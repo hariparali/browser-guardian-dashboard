@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Browser Guardian — Parent Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f0f2f8; color: #2c2c3a; min-height: 100vh; }
+
+    header { background: linear-gradient(135deg, #1a237e, #283593); color: #fff; padding: 14px 28px;
+             box-shadow: 0 2px 8px rgba(0,0,0,.25); display: flex; align-items: center; gap: 14px; }
+    .logo { font-size: 1.25rem; font-weight: 700; }
+    .subtitle { font-size: .85rem; opacity: .75; }
+
+    .container { max-width: 1140px; margin: 24px auto; padding: 0 16px; }
+
+    .card { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.1);
+            padding: 18px 20px; margin-bottom: 16px; }
+    .card-title { font-size: 1rem; font-weight: 600; margin-bottom: 12px; color: #444; }
+
+    /* Setup panel */
+    #setupPanel { border: 2px solid #1a237e; }
+    #setupPanel h2 { color: #1a237e; margin-bottom: 12px; }
+    .setup-grid { display: grid; grid-template-columns: 160px 1fr; gap: 10px 12px; align-items: center; }
+    .setup-grid label { font-weight: 500; font-size: .9rem; }
+    .setup-grid input { padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px;
+                        font-size: .9rem; width: 100%; }
+    .btn-save { margin-top: 14px; padding: 8px 24px; background: #1a237e; color: #fff;
+                border: none; border-radius: 6px; cursor: pointer; font-size: .9rem; font-weight: 500; }
+    .btn-save:hover { background: #283593; }
+    .setup-note { margin-top: 10px; font-size: .82rem; color: #888; }
+
+    /* Controls */
+    .controls-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .controls-bar label { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+    .controls-bar input[type="date"] { padding: 6px 10px; border: 1px solid #ccc;
+                                       border-radius: 6px; font-size: .9rem; }
+    .btn-load { padding: 7px 20px; background: #1a237e; color: #fff; border: none;
+                border-radius: 6px; cursor: pointer; font-size: .9rem; font-weight: 500; }
+    .btn-load:hover { background: #283593; }
+    .total-label { margin-left: auto; color: #666; font-size: .88rem; }
+    .flag-label { font-size: .88rem; color: #888; }
+    .flag-label.has-flags { color: #c62828; font-weight: 600; }
+
+    /* Chips */
+    .chip { display: inline-block; background: #e8eaf6; color: #1a237e; padding: 4px 12px;
+            border-radius: 20px; font-size: .82rem; margin: 3px 4px 3px 0; }
+    .chip b { margin-left: 4px; }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+    thead { background: #1a237e; color: #fff; }
+    th { padding: 11px 14px; text-align: left; font-weight: 500; white-space: nowrap; }
+    td { padding: 9px 14px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f9f9fd; }
+    tr.flagged td { background: #fff8f8; }
+    tr.sev-high td { background: #ffebee; }
+    tr.sev-medium td { background: #fff3e0; }
+    tr.sev-low td { background: #fffde7; }
+    .col-time { color: #777; white-space: nowrap; font-size: .8rem; }
+    .col-domain { font-weight: 600; color: #1a237e; white-space: nowrap; }
+    .col-title a { color: #333; text-decoration: none; }
+    .col-title a:hover { text-decoration: underline; color: #1a237e; }
+    .col-flag { white-space: nowrap; }
+    .reason { display: block; color: #999; font-size: .75rem; margin-top: 2px; }
+
+    /* Badges */
+    .badge { display: inline-block; padding: 2px 9px; border-radius: 12px;
+             font-size: .72rem; font-weight: 700; text-transform: uppercase; }
+    .badge-high    { background: #ffcdd2; color: #b71c1c; }
+    .badge-medium  { background: #ffe0b2; color: #e65100; }
+    .badge-low     { background: #fff9c4; color: #f57f17; }
+    .badge-safe    { background: #e8f5e9; color: #2e7d32; }
+
+    /* Misc */
+    .hint { padding: 28px; text-align: center; color: #aaa; }
+    .loading { color: #1a237e; }
+    .error-msg { padding: 20px; text-align: center; color: #c62828; font-weight: 500; }
+    .pagination { display: flex; justify-content: center; gap: 10px; padding: 8px 0 24px; }
+    .btn-page { padding: 8px 22px; background: #fff; border: 1px solid #ccc;
+                border-radius: 6px; cursor: pointer; font-size: .9rem; }
+    .btn-page:hover { background: #e8eaf6; border-color: #1a237e; }
+
+    #setupPanel { display: none; }
+    #mainPanel  { display: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">&#x1F6E1;&#xFE0F; Browser Guardian</span>
+  <span class="subtitle">Parent Dashboard</span>
+  <span style="margin-left:auto; font-size:.82rem; opacity:.7;" id="configuredFor"></span>
+  <button onclick="showSetup()" style="margin-left:12px; padding:4px 12px; background:rgba(255,255,255,.15);
+    color:#fff; border:1px solid rgba(255,255,255,.4); border-radius:5px; cursor:pointer; font-size:.8rem;">
+    &#9881; Configure
+  </button>
+</header>
+
+<div class="container">
+
+  <!-- First-time setup panel -->
+  <div class="card" id="setupPanel">
+    <h2>&#x1F527; Connect to your database</h2>
+    <p style="margin-bottom:14px; font-size:.9rem; color:#555;">
+      Enter your Supabase credentials once — they are saved locally in your browser.
+    </p>
+    <div class="setup-grid">
+      <label>Supabase URL</label>
+      <input type="text" id="cfgUrl" placeholder="https://xxxx.supabase.co">
+      <label>Supabase Anon Key</label>
+      <input type="password" id="cfgKey" placeholder="eyJ...">
+    </div>
+    <button class="btn-save" onclick="saveConfig()">Save &amp; Connect</button>
+    <p class="setup-note">
+      Find these in your Supabase project → Settings → API.
+      The anon key is safe to use here — it only reads data.
+    </p>
+  </div>
+
+  <!-- Main dashboard -->
+  <div id="mainPanel">
+
+    <div class="card controls-bar">
+      <label>Date: <input type="date" id="dateInput"></label>
+      <button class="btn-load" onclick="loadAll()">Load</button>
+      <span id="totalLabel" class="total-label"></span>
+      <span id="flagLabel" class="flag-label"></span>
+    </div>
+
+    <div class="card" id="statsCard" style="display:none">
+      <div class="card-title">Top Sites Today</div>
+      <div id="domainChips"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Browsing History</div>
+      <div id="historyTable"><p class="hint">Select a date and click Load.</p></div>
+    </div>
+
+    <div id="pagination" class="pagination"></div>
+
+  </div>
+</div>
+
+<script>
+// ── Hardcoded config (safe — local file only you can access) ─────────────
+const SUPABASE_URL = 'https://ygwlxxrhbsvemgwpzdoc.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlnd2x4eHJoYnN2ZW1nd3B6ZG9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU1ODI4NjYsImV4cCI6MjA5MTE1ODg2Nn0.j_5KB3hcUP8O0ujmC8M4gftgvqpigLjRQ0mWdXuvMvg';
+
+function saveConfig() {}   // no-op, kept for button compatibility
+function showSetup() {}
+function init() {
+  document.getElementById('setupPanel').style.display = 'none';
+  document.getElementById('mainPanel').style.display = '';
+  document.getElementById('configuredFor').textContent = 'ygwlxxrhbsvemgwpzdoc.supabase.co';
+}
+
+// ── Supabase REST helpers ─────────────────────────────────────────────────
+async function sbFetch(path, queryString) {
+  const resp = await fetch(`${SUPABASE_URL}/rest/v1/${path}?${queryString}`, {
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+    }
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+  return resp.json();
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────
+let currentPage = 1;
+document.getElementById('dateInput').value = new Date().toISOString().split('T')[0];
+
+async function loadAll(page = 1) {
+  currentPage = page;
+  const date = document.getElementById('dateInput').value;
+  if (!date) return;
+
+  document.getElementById('historyTable').innerHTML =
+    '<p class="hint loading">Loading&#8230;</p>';
+  document.getElementById('statsCard').style.display = 'none';
+  document.getElementById('pagination').innerHTML = '';
+  document.getElementById('totalLabel').textContent = '';
+  document.getElementById('flagLabel').textContent = '';
+
+  const offset = (page - 1) * 50;
+  const histQS = `visited_at=gte.${date}T00:00:00&visited_at=lte.${date}T23:59:59&order=visited_at.desc&limit=50&offset=${offset}`;
+  const domQS  = `select=domain&visited_at=gte.${date}T00:00:00&visited_at=lte.${date}T23:59:59&limit=1000`;
+
+  try {
+    const [history, allDomains] = await Promise.all([
+      sbFetch('browsing_history', histQS),
+      sbFetch('browsing_history', domQS),
+    ]);
+
+    renderSummary(allDomains);
+    renderTable(history, page);
+  } catch (err) {
+    document.getElementById('historyTable').innerHTML =
+      `<p class="error-msg">Error: ${err.message}</p>`;
+  }
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────
+function renderSummary(rows) {
+  document.getElementById('totalLabel').textContent = `${rows.length} visits`;
+
+  const counts = {};
+  rows.forEach(r => { const d = r.domain || 'unknown'; counts[d] = (counts[d] || 0) + 1; });
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+  if (top.length) {
+    document.getElementById('statsCard').style.display = '';
+    document.getElementById('domainChips').innerHTML =
+      top.map(([d, c]) => `<span class="chip">${d} <b>${c}</b></span>`).join('');
+  }
+}
+
+function renderTable(records, page) {
+  if (!records.length) {
+    document.getElementById('historyTable').innerHTML =
+      '<p class="hint">No history found for this date.</p>';
+    return;
+  }
+
+  const flagged = records.filter(r => r.is_flagged).length;
+  const flagEl = document.getElementById('flagLabel');
+  if (flagged) {
+    flagEl.textContent = `⚠️ ${flagged} flagged`;
+    flagEl.className = 'flag-label has-flags';
+  } else {
+    flagEl.textContent = '';
+    flagEl.className = 'flag-label';
+  }
+
+  const rows = records.map(r => {
+    const time = (r.visited_at || '').replace('T', ' ').substring(0, 19);
+    const title = (r.title || r.url || '').substring(0, 72);
+    const rowClass = r.is_flagged ? `flagged sev-${r.severity}` : '';
+    const sev = r.severity || 'low';
+    const badge = r.is_flagged
+      ? `<span class="badge badge-${sev}">${r.category || 'flagged'}</span>`
+      : `<span class="badge badge-safe">safe</span>`;
+    const reason = r.reason ? `<small class="reason">${r.reason}</small>` : '';
+    const safeUrl = r.url ? r.url.replace(/"/g, '&quot;') : '#';
+    return `<tr class="${rowClass}">
+      <td class="col-time">${time}</td>
+      <td class="col-domain">${r.domain || ''}</td>
+      <td class="col-title"><a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${title}</a></td>
+      <td class="col-flag">${badge}${reason}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('historyTable').innerHTML = `
+    <table>
+      <thead><tr><th>Time</th><th>Domain</th><th>Page</th><th>Safety</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+
+  let pHtml = '';
+  if (page > 1) pHtml += `<button class="btn-page" onclick="loadAll(${page - 1})">&#8592; Previous</button>`;
+  if (records.length === 50) pHtml += `<button class="btn-page" onclick="loadAll(${page + 1})">Next &#8594;</button>`;
+  document.getElementById('pagination').innerHTML = pHtml;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

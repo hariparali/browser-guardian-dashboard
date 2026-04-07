@@ -1,0 +1,6 @@
+desktop/config.json
+desktop/browsing_history.db
+desktop/__pycache__/
+desktop/*.pyc
+dashboard/
+.env
