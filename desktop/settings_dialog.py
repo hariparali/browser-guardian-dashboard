@@ -12,7 +12,7 @@ class SettingsDialog:
     def show(self):
         root = tk.Tk()
         root.title('Browser Guardian — Settings')
-        root.geometry('460x360')
+        root.geometry('460x400')
         root.resizable(False, False)
         root.attributes('-topmost', True)
         root.eval('tk::PlaceWindow . center')
@@ -31,27 +31,31 @@ class SettingsDialog:
             return w
 
         timer_var = tk.IntVar(value=self._config.get('timer_minutes', 30))
-        row('Session timer (minutes):', lambda f: ttk.Spinbox(f, from_=1, to=180,
+        row('Browser timer (minutes):', lambda f: ttk.Spinbox(f, from_=1, to=180,
             textvariable=timer_var, width=8), 1)
+
+        roblox_var = tk.IntVar(value=self._config.get('roblox_timer_minutes', 30))
+        row('Roblox timer (minutes):', lambda f: ttk.Spinbox(f, from_=1, to=180,
+            textvariable=roblox_var, width=8), 2)
 
         close_var = tk.IntVar(value=self._config.get('auto_close_seconds', 30))
         row('Auto-close delay (seconds):', lambda f: ttk.Spinbox(f, from_=5, to=120,
-            textvariable=close_var, width=8), 2)
+            textvariable=close_var, width=8), 3)
 
         pwd_var = tk.StringVar(value=self._config.get('password', ''))
         row('Parent password:', lambda f: ttk.Entry(f, textvariable=pwd_var,
-            show='*', width=22), 3)
+            show='*', width=22), 4)
 
         surl_var = tk.StringVar(value=self._config.get('supabase_url', ''))
-        row('Supabase URL:', lambda f: ttk.Entry(f, textvariable=surl_var, width=34), 4)
+        row('Supabase URL:', lambda f: ttk.Entry(f, textvariable=surl_var, width=34), 5)
 
         skey_var = tk.StringVar(value=self._config.get('supabase_key', ''))
         row('Supabase Anon Key:', lambda f: ttk.Entry(f, textvariable=skey_var,
-            show='*', width=34), 5)
+            show='*', width=34), 6)
 
         gkey_var = tk.StringVar(value=self._config.get('gemini_api_key', ''))
         row('Gemini API Key (free):', lambda f: ttk.Entry(f, textvariable=gkey_var,
-            show='*', width=34), 6)
+            show='*', width=34), 7)
 
         def save():
             if not pwd_var.get().strip():
@@ -59,6 +63,7 @@ class SettingsDialog:
                 return
             self._on_save({
                 'timer_minutes': timer_var.get(),
+                'roblox_timer_minutes': roblox_var.get(),
                 'auto_close_seconds': close_var.get(),
                 'password': pwd_var.get(),
                 'supabase_url': surl_var.get().strip(),
@@ -69,10 +74,10 @@ class SettingsDialog:
             root.destroy()
 
         ttk.Button(frame, text='Save Settings', command=save).grid(
-            row=7, column=0, pady=18
+            row=8, column=0, pady=18
         )
         ttk.Button(frame, text='Cancel', command=root.destroy).grid(
-            row=7, column=1, pady=18
+            row=8, column=1, pady=18
         )
         root.protocol('WM_DELETE_WINDOW', root.destroy)
         root.after(100, root.focus_force)

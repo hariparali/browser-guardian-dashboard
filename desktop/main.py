@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 from config import load_config, save_config
 from db_manager import init_db, insert_urls, get_unsynced, mark_synced
 from history_reader import get_new_history
-from browser_monitor import is_browser_running, kill_browsers
+from browser_monitor import is_browser_running, kill_browsers, is_roblox_running, kill_roblox
 from timer_manager import TimerManager, TimerState
 from password_dialog import PasswordDialog
 from settings_dialog import SettingsDialog
@@ -124,8 +124,8 @@ def remove_startup():
 
 
 # ── Password dialog helpers ───────────────────────────────────────────────────
-def _show_password_dialog():
-    """Show the browser-lock password dialog; guard against duplicates."""
+def _show_password_dialog(subject='Browser', on_correct=None, on_timeout=None):
+    """Show the lock password dialog; guard against duplicates."""
     global _dialog_open
     with _dialog_lock:
         if _dialog_open:
@@ -137,9 +137,10 @@ def _show_password_dialog():
         try:
             dialog = PasswordDialog(
                 countdown_secs=config['auto_close_seconds'],
-                on_correct=_on_password_correct,
-                on_timeout=_on_password_timeout,
+                on_correct=on_correct,
+                on_timeout=on_timeout,
                 get_password=lambda: config['password'],
+                subject=subject,
             )
             dialog.show()
         finally:
@@ -152,7 +153,11 @@ def _show_password_dialog():
 # ── Timer / browser event callbacks ──────────────────────────────────────────
 def _on_timer_expired():
     _set_icon('red')
-    _show_password_dialog()
+    _show_password_dialog(
+        subject='Browser',
+        on_correct=_on_password_correct,
+        on_timeout=_on_password_timeout,
+    )
 
 
 def _on_password_correct():
@@ -163,6 +168,23 @@ def _on_password_correct():
 def _on_password_timeout():
     kill_browsers()
     _set_icon('red')
+
+
+# ── Roblox timer callbacks ────────────────────────────────────────────────────
+def _on_roblox_timer_expired():
+    _show_password_dialog(
+        subject='Roblox',
+        on_correct=_on_roblox_password_correct,
+        on_timeout=_on_roblox_password_timeout,
+    )
+
+
+def _on_roblox_password_correct():
+    roblox_timer_mgr.start_new_session()
+
+
+def _on_roblox_password_timeout():
+    kill_roblox()
 
 
 # ── Browser state watcher ─────────────────────────────────────────────────────
@@ -190,6 +212,28 @@ def _browser_watch_loop():
             was_running = now_running
         except Exception as e:
             log.error('[browser_watch] %s', e)
+        time.sleep(2)
+
+
+# ── Roblox state watcher ─────────────────────────────────────────────────────
+def _roblox_watch_loop():
+    was_running = False
+    while True:
+        try:
+            now_running = is_roblox_running()
+            if now_running and not was_running:
+                if roblox_timer_mgr.state == TimerState.IDLE:
+                    roblox_timer_mgr.start_new_session()
+                elif roblox_timer_mgr.state == TimerState.PAUSED and roblox_timer_mgr.get_remaining() > 0:
+                    roblox_timer_mgr.resume()
+                elif roblox_timer_mgr.is_expired():
+                    kill_roblox()
+            elif not now_running and was_running:
+                if roblox_timer_mgr.state == TimerState.RUNNING:
+                    roblox_timer_mgr.pause()
+            was_running = now_running
+        except Exception as e:
+            log.error('[roblox_watch] %s', e)
         time.sleep(2)
 
 
@@ -350,9 +394,13 @@ def action_status(icon, item):
         startup = 'Yes' if is_registered_at_startup() else 'No'
         messagebox.showinfo(
             'Browser Guardian',
-            f'Timer state:     {timer_mgr.state}\n'
-            f'Time remaining:  {timer_mgr.get_remaining_str()}\n'
-            f'Run at startup:  {startup}'
+            f'--- Browser ---\n'
+            f'State:     {timer_mgr.state}\n'
+            f'Remaining: {timer_mgr.get_remaining_str()}\n\n'
+            f'--- Roblox ---\n'
+            f'State:     {roblox_timer_mgr.state}\n'
+            f'Remaining: {roblox_timer_mgr.get_remaining_str()}\n\n'
+            f'Run at startup: {startup}'
         )
         root.destroy()
     threading.Thread(target=run, daemon=True).start()
@@ -389,12 +437,14 @@ def on_tray_ready(icon):
     icon.visible = True
     init_db()
     threading.Thread(target=_browser_watch_loop, daemon=True).start()
+    threading.Thread(target=_roblox_watch_loop,  daemon=True).start()
     threading.Thread(target=_history_sync_loop,  daemon=True).start()
     url_watcher.start()
 
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
-timer_mgr = TimerManager(_on_timer_expired, lambda: config)
+timer_mgr        = TimerManager(_on_timer_expired,        lambda: config, timer_key='timer_minutes')
+roblox_timer_mgr = TimerManager(_on_roblox_timer_expired, lambda: config, timer_key='roblox_timer_minutes')
 
 menu = pystray.Menu(
     pystray.MenuItem('Status / Time Remaining', action_status),

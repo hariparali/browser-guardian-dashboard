@@ -12,6 +12,7 @@ CONFIG_FILE = os.path.join(_BASE, 'config.json')
 
 DEFAULT_CONFIG = {
     'timer_minutes': 30,
+    'roblox_timer_minutes': 30,
     'password': 'parent123',
     'auto_close_seconds': 30,
     'supabase_url': '',

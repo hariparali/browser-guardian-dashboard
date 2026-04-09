@@ -15,9 +15,10 @@ class TimerState:
 
 class TimerManager:
 
-    def __init__(self, on_expired, get_config):
+    def __init__(self, on_expired, get_config, timer_key='timer_minutes'):
         self._on_expired = on_expired
         self._get_config = get_config
+        self._timer_key  = timer_key
         self._remaining = 0
         self._state = TimerState.IDLE
         self._stop_event = threading.Event()
@@ -30,7 +31,7 @@ class TimerManager:
             self._stop_event.set()          # stop any existing tick thread
         self._stop_event.wait(timeout=0.3)
         with self._lock:
-            self._remaining = self._get_config()['timer_minutes'] * 60
+            self._remaining = self._get_config()[self._timer_key] * 60
             self._state = TimerState.RUNNING
             self._stop_event.clear()
             threading.Thread(target=self._tick, daemon=True).start()

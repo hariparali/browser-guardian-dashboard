@@ -8,18 +8,19 @@ class PasswordDialog:
     Counts down from countdown_secs; closes browser on timeout.
     """
 
-    def __init__(self, countdown_secs, on_correct, on_timeout, get_password):
+    def __init__(self, countdown_secs, on_correct, on_timeout, get_password, subject='Browser'):
         self._countdown_secs = countdown_secs
         self._on_correct = on_correct
         self._on_timeout = on_timeout
         self._get_password = get_password
+        self._subject = subject
         self._remaining = countdown_secs
         self._after_id = None
         self.root = None
 
     def show(self):
         self.root = tk.Tk()
-        self.root.title('Browser Time Limit Reached')
+        self.root.title(f'{self._subject} Time Limit Reached')
         self.root.geometry('420x230')
         self.root.resizable(False, False)
         self.root.attributes('-topmost', True)
@@ -31,7 +32,7 @@ class PasswordDialog:
         frame.pack(fill='both', expand=True)
 
         ttk.Label(
-            frame, text='Browser Time Limit Reached!',
+            frame, text=f'{self._subject} Time Limit Reached!',
             font=('Segoe UI', 13, 'bold')
         ).pack(pady=(0, 6))
 
