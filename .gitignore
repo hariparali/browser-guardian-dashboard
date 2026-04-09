@@ -1,6 +1,12 @@
 desktop/config.json
 desktop/browsing_history.db
+desktop/browser_guardian.log
+desktop/@AutomationLog.txt
 desktop/__pycache__/
 desktop/*.pyc
+desktop/build/
+desktop/dist/
 dashboard/
 .env
+Thumbs.db
+.DS_Store
