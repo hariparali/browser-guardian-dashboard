@@ -45,6 +45,7 @@ from settings_dialog import SettingsDialog
 from cloud_sync import CloudSync
 from classifier import classify
 from url_watcher import UrlWatcher
+from supabase_sync import SupabaseSync
 
 # ── State ─────────────────────────────────────────────────────────────────────
 config = load_config()
@@ -254,6 +255,19 @@ def _on_url_from_watcher(url: str, domain: str, visited_at: str):
 
 url_watcher = UrlWatcher(_on_url_from_watcher, interval=5)
 
+# ── Supabase remote sync ──────────────────────────────────────────────────────
+def _browser_state():
+    return timer_mgr.state, timer_mgr.get_remaining()
+
+def _roblox_state():
+    return roblox_timer_mgr.state, roblox_timer_mgr.get_remaining()
+
+supabase_sync = SupabaseSync(lambda: config, _browser_state, _roblox_state)
+supabase_sync.set_extend_callbacks(
+    extend_browser=lambda secs: timer_mgr.add_time(secs),
+    extend_roblox=lambda secs: roblox_timer_mgr.add_time(secs),
+)
+
 
 # ── Background history sync ───────────────────────────────────────────────────
 def _history_sync_loop():
@@ -300,6 +314,7 @@ def _do_kill_switch(remove_from_startup: bool):
     # 1. Stop all background activity
     timer_mgr.stop()
     url_watcher.stop()
+    supabase_sync.stop()
 
     # 2. Remove from Windows startup registry if requested
     if remove_from_startup:
@@ -440,6 +455,7 @@ def on_tray_ready(icon):
     threading.Thread(target=_roblox_watch_loop,  daemon=True).start()
     threading.Thread(target=_history_sync_loop,  daemon=True).start()
     url_watcher.start()
+    supabase_sync.start()
 
 
 # ── Boot ──────────────────────────────────────────────────────────────────────

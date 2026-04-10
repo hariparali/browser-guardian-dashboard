@@ -51,6 +51,16 @@ class TimerManager:
                 self._stop_event.clear()
                 threading.Thread(target=self._tick, daemon=True).start()
 
+    def add_time(self, seconds):
+        """Add extra seconds to the current session (remote extend)."""
+        with self._lock:
+            if self._state in (TimerState.RUNNING, TimerState.PAUSED,
+                               TimerState.EXPIRED):
+                self._remaining += seconds
+                if self._state == TimerState.EXPIRED:
+                    # Will resume next time the app opens
+                    self._state = TimerState.PAUSED
+
     def stop(self):
         """Stop and reset to idle (app quitting)."""
         with self._lock:
