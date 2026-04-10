@@ -18,9 +18,12 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-echo [3/3] Copying config template...
-if not exist "dist\BrowserGuardian\config.json" (
-    copy config.json "dist\BrowserGuardian\config.json" >nul 2>&1
+echo [3/3] Copying config (with Supabase credentials)...
+copy /Y config.json "dist\BrowserGuardian\config.json" >nul 2>&1
+if errorlevel 1 (
+    echo WARNING: config.json not found — app will need credentials entered via Settings on first run.
+) else (
+    echo config.json copied OK.
 )
 
 echo.
