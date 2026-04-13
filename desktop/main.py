@@ -328,19 +328,48 @@ def _history_sync_loop():
 
 
 # ── Nightly reset ────────────────────────────────────────────────────────────
+_RESET_FILE = os.path.join(_BASE, 'last_reset.txt')
+
 def _midnight_reset_loop():
-    """Sleep until midnight, reset both timers to daily allowance, repeat."""
+    """
+    Reset both timers to daily allowance at midnight.
+    On startup, if the last recorded reset was before today (laptop was off
+    at midnight), do a catch-up reset immediately so each day starts fresh.
+    """
+    def _do_reset():
+        timer_mgr.reset_to_idle()
+        roblox_timer_mgr.reset_to_idle()
+        today_str = datetime.now().date().isoformat()
+        try:
+            with open(_RESET_FILE, 'w') as f:
+                f.write(today_str)
+        except Exception:
+            pass
+        log.info('[midnight_reset] timers reset (%s)', today_str)
+
+    # ── Catch-up: did we miss midnight while the laptop was off? ──────────
+    today = datetime.now().date()
+    last_reset = None
+    try:
+        with open(_RESET_FILE) as f:
+            last_reset = datetime.strptime(f.read().strip(), '%Y-%m-%d').date()
+    except Exception:
+        pass
+
+    if last_reset is None or last_reset < today:
+        log.info('[midnight_reset] catch-up reset (last=%s, today=%s)', last_reset, today)
+        _do_reset()
+
+    # ── Then sleep until each midnight ────────────────────────────────────
     while True:
         now = datetime.now()
         midnight = (now + timedelta(days=1)).replace(
             hour=0, minute=0, second=5, microsecond=0
         )
         sleep_secs = (midnight - now).total_seconds()
-        log.info('[midnight_reset] next reset in %.0f seconds', sleep_secs)
+        log.info('[midnight_reset] next midnight reset in %.0f seconds', sleep_secs)
         time.sleep(sleep_secs)
-        timer_mgr.reset_to_idle()
-        roblox_timer_mgr.reset_to_idle()
-        log.info('[midnight_reset] both timers reset to daily allowance')
+        _do_reset()
 
 
 # ── Kill switch ───────────────────────────────────────────────────────────────
