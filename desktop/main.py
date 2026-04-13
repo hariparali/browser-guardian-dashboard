@@ -85,11 +85,18 @@ def _set_icon(color):
 def _get_startup_cmd():
     """Return the command used to launch this script silently (no terminal window)."""
     if getattr(sys, 'frozen', False):
+        # Running as compiled EXE — register the EXE itself
         return f'"{sys.executable}"'
-    # Use pythonw.exe (same dir as python.exe) — runs with no console window
+    # Running from source — always prefer the compiled EXE if it exists,
+    # so the startup entry is stable and self-contained.
+    _src_dir = os.path.dirname(os.path.abspath(__file__))
+    _exe = os.path.join(_src_dir, 'dist', 'BrowserGuardian', 'BrowserGuardian.exe')
+    if os.path.exists(_exe):
+        return f'"{_exe}"'
+    # Fallback: run source via pythonw (no console window)
     pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
     if not os.path.exists(pythonw):
-        pythonw = sys.executable  # fallback
+        pythonw = sys.executable
     return f'"{pythonw}" "{os.path.abspath(__file__)}"'
 
 

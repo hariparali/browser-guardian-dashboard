@@ -28,6 +28,7 @@ class SupabaseSync:
         self._extend_browser_cb = None
         self._extend_roblox_cb  = None
         self._stop              = threading.Event()
+        self._offline_count     = 0   # consecutive network failures
 
     def set_extend_callbacks(self, extend_browser, extend_roblox):
         """Set callbacks invoked when a remote extend command arrives."""
@@ -136,11 +137,20 @@ class SupabaseSync:
         while not self._stop.wait(5):
             if not self._is_configured():
                 continue
+            failed = False
             try:
                 self._push_status()
             except Exception as e:
-                log.warning('[supabase_sync] push: %s', e)
+                failed = True
+                self._offline_count += 1
+                # Log first failure and then every ~12th (~1 min) to avoid spam
+                if self._offline_count == 1 or self._offline_count % 12 == 0:
+                    log.warning('[supabase_sync] push: %s', e)
             try:
                 self._poll_commands()
             except Exception as e:
-                log.warning('[supabase_sync] poll: %s', e)
+                failed = True
+                if self._offline_count == 1 or self._offline_count % 12 == 0:
+                    log.warning('[supabase_sync] poll: %s', e)
+            if not failed:
+                self._offline_count = 0
