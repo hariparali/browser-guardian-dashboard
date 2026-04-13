@@ -27,6 +27,9 @@ class SupabaseSync:
         self._get_roblox_state  = get_roblox_state
         self._extend_browser_cb = None
         self._extend_roblox_cb  = None
+        self._block_browser_cb  = None
+        self._block_roblox_cb   = None
+        self._show_message_cb   = None
         self._stop              = threading.Event()
         self._offline_count     = 0   # consecutive network failures
 
@@ -34,6 +37,12 @@ class SupabaseSync:
         """Set callbacks invoked when a remote extend command arrives."""
         self._extend_browser_cb = extend_browser
         self._extend_roblox_cb  = extend_roblox
+
+    def set_action_callbacks(self, block_browser, block_roblox, show_message):
+        """Set callbacks for block and message commands."""
+        self._block_browser_cb = block_browser
+        self._block_roblox_cb  = block_roblox
+        self._show_message_cb  = show_message
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -108,13 +117,24 @@ class SupabaseSync:
         params  = cmd.get('params') or {}
         cmd_id  = cmd.get('id')
         try:
-            minutes = int(params.get('minutes', 30))
             if command == 'extend_browser' and self._extend_browser_cb:
+                minutes = int(params.get('minutes', 30))
                 self._extend_browser_cb(minutes * 60)
                 log.info('[supabase_sync] extend_browser +%dm', minutes)
             elif command == 'extend_roblox' and self._extend_roblox_cb:
+                minutes = int(params.get('minutes', 30))
                 self._extend_roblox_cb(minutes * 60)
                 log.info('[supabase_sync] extend_roblox +%dm', minutes)
+            elif command == 'block_browser' and self._block_browser_cb:
+                self._block_browser_cb()
+                log.info('[supabase_sync] block_browser executed')
+            elif command == 'block_roblox' and self._block_roblox_cb:
+                self._block_roblox_cb()
+                log.info('[supabase_sync] block_roblox executed')
+            elif command == 'show_message' and self._show_message_cb:
+                message = str(params.get('message', ''))[:500]
+                self._show_message_cb(message)
+                log.info('[supabase_sync] show_message: %s', message[:60])
         except Exception as e:
             log.error('[supabase_sync] execute error: %s', e)
         finally:

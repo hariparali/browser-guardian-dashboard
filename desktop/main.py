@@ -15,6 +15,7 @@ import os
 import sys
 import winreg
 import logging
+from datetime import datetime, timedelta
 
 import pystray
 from PIL import Image, ImageDraw
@@ -46,6 +47,7 @@ from cloud_sync import CloudSync
 from classifier import classify
 from url_watcher import UrlWatcher
 from supabase_sync import SupabaseSync
+from message_dialog import MessageDialog
 
 # ── State ─────────────────────────────────────────────────────────────────────
 config = load_config()
@@ -269,10 +271,26 @@ def _browser_state():
 def _roblox_state():
     return roblox_timer_mgr.state, roblox_timer_mgr.get_remaining()
 
+def _remote_block_browser():
+    kill_browsers()
+    timer_mgr.force_block()
+
+def _remote_block_roblox():
+    kill_roblox()
+    roblox_timer_mgr.force_block()
+
+def _remote_show_message(message):
+    threading.Thread(target=lambda: MessageDialog(message).show(), daemon=True).start()
+
 supabase_sync = SupabaseSync(lambda: config, _browser_state, _roblox_state)
 supabase_sync.set_extend_callbacks(
     extend_browser=lambda secs: timer_mgr.add_time(secs),
     extend_roblox=lambda secs: roblox_timer_mgr.add_time(secs),
+)
+supabase_sync.set_action_callbacks(
+    block_browser=_remote_block_browser,
+    block_roblox=_remote_block_roblox,
+    show_message=_remote_show_message,
 )
 
 
@@ -307,6 +325,22 @@ def _history_sync_loop():
         except Exception as e:
             log.error('[history_sync] %s', e)
         time.sleep(30)
+
+
+# ── Nightly reset ────────────────────────────────────────────────────────────
+def _midnight_reset_loop():
+    """Sleep until midnight, reset both timers to daily allowance, repeat."""
+    while True:
+        now = datetime.now()
+        midnight = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=5, microsecond=0
+        )
+        sleep_secs = (midnight - now).total_seconds()
+        log.info('[midnight_reset] next reset in %.0f seconds', sleep_secs)
+        time.sleep(sleep_secs)
+        timer_mgr.reset_to_idle()
+        roblox_timer_mgr.reset_to_idle()
+        log.info('[midnight_reset] both timers reset to daily allowance')
 
 
 # ── Kill switch ───────────────────────────────────────────────────────────────
@@ -458,9 +492,10 @@ def action_settings(icon, item):
 def on_tray_ready(icon):
     icon.visible = True
     init_db()
-    threading.Thread(target=_browser_watch_loop, daemon=True).start()
-    threading.Thread(target=_roblox_watch_loop,  daemon=True).start()
-    threading.Thread(target=_history_sync_loop,  daemon=True).start()
+    threading.Thread(target=_browser_watch_loop,   daemon=True).start()
+    threading.Thread(target=_roblox_watch_loop,    daemon=True).start()
+    threading.Thread(target=_history_sync_loop,    daemon=True).start()
+    threading.Thread(target=_midnight_reset_loop,  daemon=True).start()
     url_watcher.start()
     supabase_sync.start()
 

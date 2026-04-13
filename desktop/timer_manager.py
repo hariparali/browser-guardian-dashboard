@@ -61,6 +61,23 @@ class TimerManager:
                     # Will resume next time the app opens
                     self._state = TimerState.PAUSED
 
+    def force_block(self):
+        """Immediately expire the timer to zero (remote block command)."""
+        with self._lock:
+            self._stop_event.set()
+            self._remaining = 0
+            self._state = TimerState.EXPIRED
+
+    def reset_to_idle(self):
+        """Reset to full daily allowance, state=IDLE (nightly reset)."""
+        with self._lock:
+            self._stop_event.set()
+        self._stop_event.wait(timeout=0.3)
+        with self._lock:
+            self._remaining = self._get_config()[self._timer_key] * 60
+            self._state = TimerState.IDLE
+            self._stop_event.clear()
+
     def stop(self):
         """Stop and reset to idle (app quitting)."""
         with self._lock:

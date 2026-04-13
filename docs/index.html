@@ -105,6 +105,17 @@
                border: 1px solid #9fa8da; border-radius: 5px; cursor: pointer; font-weight: 600; }
     .btn-ext:hover { background: #c5cae9; }
     .btn-ext:disabled { opacity: .4; cursor: default; }
+    .btn-block { padding: 4px 10px; font-size: .75rem; background: #ffebee; color: #c62828;
+                 border: 1px solid #ef9a9a; border-radius: 5px; cursor: pointer; font-weight: 700; margin-left: 6px; }
+    .btn-block:hover { background: #ffcdd2; }
+    .btn-block:disabled { opacity: .4; cursor: default; }
+    .msg-row { display: flex; gap: 6px; margin-top: 10px; }
+    .msg-input { flex: 1; padding: 6px 9px; border: 1px solid #c5cae9; border-radius: 5px;
+                 font-size: .82rem; font-family: inherit; }
+    .btn-msg { padding: 6px 13px; font-size: .78rem; background: #1a237e; color: #fff;
+               border: none; border-radius: 5px; cursor: pointer; font-weight: 600; white-space: nowrap; }
+    .btn-msg:hover { background: #283593; }
+    .btn-msg:disabled { opacity: .4; cursor: default; }
     .last-seen { font-size: .75rem; color: #999; margin-top: 8px; }
     .no-devices { padding: 18px; text-align: center; color: #aaa; font-size: .9rem; }
 
@@ -356,6 +367,49 @@ async function sendExtend(deviceId, target, minutes, btn) {
   }
 }
 
+async function sendBlock(deviceId, target, btn) {
+  if (!confirm(`Block ${target} on "${deviceId}" immediately?`)) return;
+  btn.disabled = true;
+  btn.textContent = '\u2026';
+  try {
+    await sbPost('remote_commands', {
+      device_id: deviceId,
+      command: `block_${target}`,
+      params: {},
+      status: 'pending',
+    });
+    btn.textContent = '\u2713 Blocked';
+    setTimeout(() => { btn.disabled = false; btn.innerHTML = '&#x26D4; Block'; }, 4000);
+  } catch(e) {
+    btn.innerHTML = '&#x26D4; Block';
+    btn.disabled = false;
+    alert('Error: ' + e.message);
+  }
+}
+
+async function sendMessage(deviceId, inputId, btn) {
+  const input = document.getElementById(inputId);
+  const message = (input.value || '').trim();
+  if (!message) { input.focus(); return; }
+  btn.disabled = true;
+  btn.textContent = '\u2026';
+  try {
+    await sbPost('remote_commands', {
+      device_id: deviceId,
+      command: 'show_message',
+      params: { message },
+      status: 'pending',
+    });
+    btn.textContent = '\u2713 Sent';
+    input.value = '';
+    setTimeout(() => { btn.disabled = false; btn.innerHTML = '&#x1F4AC; Send'; }, 3000);
+  } catch(e) {
+    btn.innerHTML = '&#x1F4AC; Send';
+    btn.disabled = false;
+    alert('Error: ' + e.message);
+  }
+}
+
 function renderDevices(devices) {
   const grid = document.getElementById('deviceGrid');
   if (!devices.length) {
@@ -370,6 +424,7 @@ function renderDevices(devices) {
     const extBtns = (target) => [15, 30, 60].map(m =>
       `<button class="btn-ext" onclick="sendExtend('${d.device_id}','${target}',${m},this)">+${m}m</button>`
     ).join('');
+    const msgId = `msg-${d.device_id.replace(/[^a-z0-9]/gi,'_')}`;
     return `
       <div class="device-card${stale ? ' offline' : ''}">
         <div class="device-name">
@@ -379,12 +434,22 @@ function renderDevices(devices) {
         <div class="timer-row">
           <span class="timer-label">&#x1F310; Browser</span>
           <span class="timer-val ${bFmt.cls}">${bFmt.text}</span>
-          <div class="extend-btns">${extBtns('browser')}</div>
+          <div class="extend-btns">
+            ${extBtns('browser')}
+            <button class="btn-block" onclick="sendBlock('${d.device_id}','browser',this)">&#x26D4; Block</button>
+          </div>
         </div>
         <div class="timer-row">
           <span class="timer-label">&#x1F3AE; Roblox</span>
           <span class="timer-val ${rFmt.cls}">${rFmt.text}</span>
-          <div class="extend-btns">${extBtns('roblox')}</div>
+          <div class="extend-btns">
+            ${extBtns('roblox')}
+            <button class="btn-block" onclick="sendBlock('${d.device_id}','roblox',this)">&#x26D4; Block</button>
+          </div>
+        </div>
+        <div class="msg-row">
+          <input class="msg-input" id="${msgId}" type="text" placeholder="Type a message to show on screen&#8230;" maxlength="200">
+          <button class="btn-msg" onclick="sendMessage('${d.device_id}','${msgId}',this)">&#x1F4AC; Send</button>
         </div>
         <div class="last-seen">Last seen: ${secsAgo(d.last_updated)}${stale ? ' \u2014 <b>OFFLINE</b>' : ''}</div>
       </div>`;
