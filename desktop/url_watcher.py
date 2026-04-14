@@ -5,22 +5,25 @@ Polls every N seconds and calls a callback with new URLs.
 Captures incognito and normal browsing alike.
 """
 import time
+import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
+
+log = logging.getLogger(__name__)
 
 try:
     import uiautomation as auto
     _AUTO_AVAILABLE = True
 except ImportError:
     _AUTO_AVAILABLE = False
-    print('[url_watcher] uiautomation not installed — address bar monitoring disabled')
+    log.warning('[url_watcher] uiautomation not installed — address bar monitoring disabled')
 
 # Chrome and Edge share the same window class
 _BROWSER_CLASS = 'Chrome_WidgetWin_1'
 _ADDRESS_BAR_NAMES = (
-    'Address and search bar',   # Chrome
-    'Address bar',              # Edge
+    'Address and search bar',   # Chrome (normal + incognito)
+    'Address bar',              # Edge (normal + InPrivate)
 )
 
 
@@ -60,7 +63,7 @@ def _read_active_url() -> str | None:
     except Exception as e:
         # -2147220991 = COM "event unable to invoke subscribers" — transient, ignore silently
         if '-2147220991' not in str(e):
-            print(f'[url_watcher] read error: {e}')
+            log.debug('[url_watcher] read error: %s', e)
     return None
 
 
@@ -78,8 +81,10 @@ class UrlWatcher:
 
     def start(self):
         if not _AUTO_AVAILABLE:
+            log.warning('[url_watcher] not starting — uiautomation unavailable')
             return
         self._running = True
+        log.info('[url_watcher] started (interval=%ds)', self._interval)
         threading.Thread(target=self._loop, daemon=True).start()
 
     def stop(self):
@@ -98,8 +103,9 @@ class UrlWatcher:
                 if url and url != self._last_url:
                     self._last_url = url
                     domain = _get_domain(url)
-                    visited_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    visited_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                    log.info('[url_watcher] captured: %s', domain)
                     self._on_new_url(url, domain, visited_at)
             except Exception as e:
-                print(f'[url_watcher] loop error: {e}')
+                log.error('[url_watcher] loop error: %s', e)
             time.sleep(self._interval)
