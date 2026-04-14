@@ -66,6 +66,8 @@ from message_dialog import MessageDialog
 
 # ── State ─────────────────────────────────────────────────────────────────────
 config = load_config()
+if config.get('gemini_api_key'):
+    os.environ['GEMINI_API_KEY'] = config['gemini_api_key']
 cloud_sync = CloudSync(lambda: config)
 last_history_check = None
 tray_icon = None
