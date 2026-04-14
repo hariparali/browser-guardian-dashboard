@@ -174,24 +174,13 @@ Flag true for: adult/explicit content, graphic violence, gambling, heavy gaming,
 severity=high: adult/explicit/gambling. severity=medium: gaming/social media. severity=low: borderline."""
 
 
-_RATE_LIMIT_SECS = 5  # free tier = 15 RPM → 1 per 4s; use 5s to be safe
-_last_gemini_call = 0.0
-
-
 def _gemini_classify(url: str, title: str, domain: str):
     """Returns a result dict, or None if rate-limited/errored (caller must not cache None)."""
-    import time
-    global _last_gemini_call
     model = _get_gemini_model()
     if model is None:
         return {'is_flagged': False, 'category': 'unclassified',
                 'reason': 'Gemini key not set', 'severity': 'low'}
-    # Enforce rate limit
-    elapsed = time.time() - _last_gemini_call
-    if elapsed < _RATE_LIMIT_SECS:
-        time.sleep(_RATE_LIMIT_SECS - elapsed)
     try:
-        _last_gemini_call = time.time()
         resp = model.generate_content(
             _GEMINI_PROMPT.format(url=url, title=title, domain=domain)
         )
