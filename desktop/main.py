@@ -52,7 +52,7 @@ threading.excepthook = lambda args: log.critical(
 )
 
 from config import load_config, save_config
-from db_manager import init_db, insert_urls, get_unsynced, mark_synced
+from db_manager import init_db, insert_urls, get_unsynced, mark_synced, update_classification, get_unclassified
 from history_reader import get_new_history
 from browser_monitor import is_browser_running, kill_browsers, is_roblox_running, kill_roblox
 from timer_manager import TimerManager, TimerState
@@ -316,22 +316,27 @@ supabase_sync.set_action_callbacks(
 
 # ── Background history sync ───────────────────────────────────────────────────
 def _history_sync_loop():
+    """
+    Fast path: insert new URLs immediately with rule-based classification.
+    Unknown domains go in as 'unclassified' right away so they appear in
+    the dashboard without waiting for Gemini.
+    """
     global last_history_check
     while True:
         try:
             raw_entries = get_new_history(last_history_check)
             if raw_entries:
-                classified = []
+                fast_classified = []
                 for url, title, domain, visited_at in raw_entries:
-                    result = classify(url, title, domain)
-                    classified.append((
+                    result = classify(url, title, domain, gemini=False)
+                    fast_classified.append((
                         url, title, domain, visited_at,
                         1 if result.get('is_flagged') else 0,
                         result.get('category', 'unclassified'),
                         result.get('reason', ''),
                         result.get('severity', 'low'),
                     ))
-                insert_urls(classified)
+                insert_urls(fast_classified)
                 from datetime import datetime
                 last_history_check = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -345,6 +350,35 @@ def _history_sync_loop():
         except Exception as e:
             log.error('[history_sync] %s', e)
         time.sleep(30)
+
+
+def _gemini_classify_loop():
+    """
+    Slow path: runs in its own thread, picks up unclassified rows and
+    upgrades them with Gemini results (rate-limited). Syncs updated rows.
+    """
+    while True:
+        try:
+            rows = get_unclassified(limit=50)
+            for url, title, domain, visited_at in rows:
+                result = classify(url, title, domain, gemini=True)
+                if result and result.get('category', 'unclassified') != 'unclassified':
+                    update_classification(
+                        url, visited_at,
+                        1 if result.get('is_flagged') else 0,
+                        result.get('category', 'unclassified'),
+                        result.get('reason', ''),
+                        result.get('severity', 'low'),
+                    )
+            # Push any newly classified rows to Supabase
+            unsynced = get_unsynced()
+            if unsynced:
+                ok, msg = cloud_sync.sync(unsynced)
+                if ok:
+                    mark_synced([r[0] for r in unsynced])
+        except Exception as e:
+            log.error('[gemini_classify] %s', e)
+        time.sleep(60)
 
 
 # ── Nightly reset ────────────────────────────────────────────────────────────
@@ -541,10 +575,11 @@ def action_settings(icon, item):
 def on_tray_ready(icon):
     icon.visible = True
     init_db()
-    threading.Thread(target=_browser_watch_loop,   daemon=True).start()
-    threading.Thread(target=_roblox_watch_loop,    daemon=True).start()
-    threading.Thread(target=_history_sync_loop,    daemon=True).start()
-    threading.Thread(target=_midnight_reset_loop,  daemon=True).start()
+    threading.Thread(target=_browser_watch_loop,    daemon=True).start()
+    threading.Thread(target=_roblox_watch_loop,     daemon=True).start()
+    threading.Thread(target=_history_sync_loop,     daemon=True).start()
+    threading.Thread(target=_gemini_classify_loop,  daemon=True).start()
+    threading.Thread(target=_midnight_reset_loop,   daemon=True).start()
     url_watcher.start()
     supabase_sync.start()
 

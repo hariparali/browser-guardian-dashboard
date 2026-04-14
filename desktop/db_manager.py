@@ -62,6 +62,34 @@ def get_unsynced(limit=200):
     return rows
 
 
+def update_classification(url, visited_at, is_flagged, category, reason, severity):
+    """Update classification for an already-inserted row."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        '''UPDATE browsing_history
+           SET is_flagged=?, category=?, reason=?, severity=?, is_synced=0
+           WHERE url=? AND visited_at=? AND category='unclassified' ''',
+        (is_flagged, category, reason, severity, url, visited_at)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_unclassified(limit=50):
+    """Return rows still marked unclassified, for background Gemini processing."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        '''SELECT url, title, domain, visited_at FROM browsing_history
+           WHERE category='unclassified' LIMIT ?''',
+        (limit,)
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
 def mark_synced(ids):
     if not ids:
         return

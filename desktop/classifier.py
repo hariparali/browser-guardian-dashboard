@@ -210,9 +210,10 @@ def _gemini_classify(url: str, title: str, domain: str):
 
 
 # ── Public API ────────────────────────────────────────────────────────────
-def classify(url: str, title: str = '', domain: str = '') -> dict:
+def classify(url: str, title: str = '', domain: str = '', gemini: bool = True) -> dict:
     """
-    Classify a URL. Checks rules first, falls back to Gemini for unknowns.
+    Classify a URL. Checks rules first, optionally falls back to Gemini.
+    Pass gemini=False for the fast path (no API calls, unknown → unclassified).
     Results cached per domain for the lifetime of the process.
     """
     cache_key = domain or url
@@ -228,14 +229,19 @@ def classify(url: str, title: str = '', domain: str = '') -> dict:
             'reason': reason,
             'severity': sev,
         }
-    else:
-        result = _gemini_classify(url, title, domain)
-        if result is None:
-            # Rate-limited — return unclassified without caching so it's retried next cycle
-            return {'is_flagged': False, 'category': 'unclassified',
-                    'reason': 'rate limited', 'severity': 'low'}
+        _cache[cache_key] = result
+        return result
+
+    if not gemini:
+        return {'is_flagged': False, 'category': 'unclassified',
+                'reason': '', 'severity': 'low'}
+
+    result = _gemini_classify(url, title, domain)
+    if result is None:
+        # Rate-limited — don't cache, will be retried
+        return {'is_flagged': False, 'category': 'unclassified',
+                'reason': 'rate limited', 'severity': 'low'}
 
     _cache[cache_key] = result
-    if not rule:  # only persist Gemini results (rule results are always recomputed cheaply)
-        _save_cache()
+    _save_cache()
     return result
