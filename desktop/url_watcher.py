@@ -35,7 +35,16 @@ def _get_domain(url: str) -> str:
 
 
 def _looks_like_url(text: str) -> bool:
-    return text.startswith('http://') or text.startswith('https://')
+    return text.startswith('http://') or text.startswith('https://') or (
+        '.' in text and ' ' not in text and not text.startswith('Search') and len(text) > 3
+    )
+
+
+def _normalise_url(text: str) -> str:
+    """Add https:// if Chrome omitted it (modern Chrome hides the scheme)."""
+    if text.startswith('http://') or text.startswith('https://'):
+        return text
+    return 'https://' + text
 
 
 def _read_active_url() -> str | None:
@@ -57,7 +66,7 @@ def _read_active_url() -> str | None:
                         continue
                     val = edit.GetValuePattern().Value.strip()
                     if _looks_like_url(val):
-                        return val
+                        return _normalise_url(val)
                 except Exception:
                     continue
     except Exception as e:
