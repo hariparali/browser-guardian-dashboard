@@ -15,6 +15,7 @@ import os
 import sys
 import winreg
 import logging
+import traceback
 from datetime import datetime, timedelta
 
 import pystray
@@ -35,6 +36,20 @@ logging.basicConfig(
 # Also mirror to stdout when running from terminal
 logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
 log = logging.getLogger(__name__)
+
+
+def _log_exception(exc_type, exc_value, exc_tb):
+    """Log unhandled exceptions to file before the process dies."""
+    log.critical('UNHANDLED EXCEPTION:\n%s',
+                 ''.join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+
+
+sys.excepthook = _log_exception
+threading.excepthook = lambda args: log.critical(
+    'UNHANDLED THREAD EXCEPTION (thread=%s):\n%s',
+    args.thread.name if args.thread else '?',
+    ''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)),
+)
 
 from config import load_config, save_config
 from db_manager import init_db, insert_urls, get_unsynced, mark_synced
@@ -213,8 +228,11 @@ def _browser_watch_loop():
                     _set_icon('green')
                 elif timer_mgr.is_expired():
                     _set_icon('red')
-                    _show_password_dialog()
-                    _set_icon('green')
+                    _show_password_dialog(
+                        subject='Browser',
+                        on_correct=_on_password_correct,
+                        on_timeout=_on_password_timeout,
+                    )
             elif not now_running and was_running:
                 if timer_mgr.state == TimerState.RUNNING:
                     timer_mgr.pause()

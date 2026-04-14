@@ -77,7 +77,11 @@ class PasswordDialog:
         if self._pwd_var.get() == self._get_password():
             self._cancel_timer()
             self.root.destroy()
-            self._on_correct()
+            if self._on_correct:
+                try:
+                    self._on_correct()
+                except Exception:
+                    pass
         else:
             self._status_var.set('Incorrect password — try again.')
             self._pwd_var.set('')
@@ -89,7 +93,11 @@ class PasswordDialog:
                 self.root.destroy()
             except Exception:
                 pass
-        self._on_timeout()
+        if self._on_timeout:
+            try:
+                self._on_timeout()
+            except Exception:
+                pass
 
     def _cancel_timer(self):
         if self._after_id is not None:
