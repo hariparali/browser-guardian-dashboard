@@ -79,6 +79,29 @@ _ADULT_KEYWORDS = [
 _gemini_model = None
 _cache: dict = {}
 
+# ── Persistent domain cache ───────────────────────────────────────────────
+# Saved next to the EXE so Gemini is called at most once per domain, ever.
+if getattr(__import__('sys'), 'frozen', False):
+    _CACHE_FILE = os.path.join(os.path.dirname(__import__('sys').executable), 'domain_cache.json')
+else:
+    _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'domain_cache.json')
+
+def _load_cache():
+    try:
+        with open(_CACHE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_cache():
+    try:
+        with open(_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(_cache, f)
+    except Exception:
+        pass
+
+_cache = _load_cache()
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 def _strip_www(domain: str) -> str:
@@ -194,4 +217,6 @@ def classify(url: str, title: str = '', domain: str = '') -> dict:
         result = _gemini_classify(url, title, domain)
 
     _cache[cache_key] = result
+    if not rule:  # only persist Gemini results (rule results are always recomputed cheaply)
+        _save_cache()
     return result
