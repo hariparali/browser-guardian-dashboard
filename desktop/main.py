@@ -333,7 +333,7 @@ def _history_sync_loop():
                     ))
                 insert_urls(classified)
                 from datetime import datetime
-                last_history_check = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                last_history_check = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
             unsynced = get_unsynced()
             if unsynced:
