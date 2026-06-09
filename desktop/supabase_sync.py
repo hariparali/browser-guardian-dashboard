@@ -151,6 +151,29 @@ class SupabaseSync:
             timeout=5,
         )
 
+    # ── Push blocked attempt ──────────────────────────────────────────────────
+
+    def push_blocked_attempt(self, domain: str, url: str, reason: str):
+        """Log a blocked adult URL to the blocked_attempts Supabase table."""
+        if not self._is_configured():
+            return
+        try:
+            payload = {
+                'device_id': DEVICE_ID,
+                'domain':    domain,
+                'url':       url[:500],
+                'reason':    reason[:200],
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }
+            hdrs = self._headers()
+            hdrs['Prefer'] = 'return=minimal'
+            resp = requests.post(self._url('blocked_attempts'), json=payload,
+                                 headers=hdrs, timeout=5)
+            if resp.status_code not in (200, 201):
+                log.warning('[supabase_sync] push_blocked HTTP %s', resp.status_code)
+        except Exception as e:
+            log.warning('[supabase_sync] push_blocked error: %s', e)
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def _loop(self):

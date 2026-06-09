@@ -1,6 +1,6 @@
 import psutil
 
-_BROWSER_NAMES = {'chrome.exe', 'msedge.exe'}
+_BROWSER_NAMES = {'chrome.exe', 'msedge.exe', 'copilot.exe'}
 _ROBLOX_NAMES  = {'robloxplayerbeta.exe', 'robloxplayer.exe', 'robloxplayerlauncher.exe'}
 
 

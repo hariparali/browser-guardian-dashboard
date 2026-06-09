@@ -13,10 +13,13 @@ import threading
 import time
 import os
 import sys
+import socket
 import winreg
 import logging
 import traceback
 from datetime import datetime, timedelta
+
+_DEVICE = socket.gethostname()
 
 import pystray
 from PIL import Image, ImageDraw
@@ -30,7 +33,7 @@ else:
 logging.basicConfig(
     filename=os.path.join(_BASE, 'browser_guardian.log'),
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
+    format=f'%(asctime)s [{_DEVICE}] [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 # Also mirror to stdout when running from terminal
@@ -63,6 +66,8 @@ from classifier import classify
 from url_watcher import UrlWatcher
 from supabase_sync import SupabaseSync
 from message_dialog import MessageDialog
+from screenshot_manager import capture as take_screenshot
+from hosts_manager import is_installed as hosts_is_installed
 
 # ── State ─────────────────────────────────────────────────────────────────────
 config = load_config()
@@ -268,21 +273,68 @@ def _roblox_watch_loop():
 
 
 # ── UI Automation URL watcher ─────────────────────────────────────────────────
-def _on_url_from_watcher(url: str, domain: str, visited_at: str):
+def _block_adult_url(url: str, domain: str, reason: str):
+    """Kill the browser and log the blocked attempt."""
+    log.warning('[adult_block] %s — %s', domain, reason)
+    kill_browsers()
+    threading.Thread(
+        target=lambda: supabase_sync.push_blocked_attempt(domain, url, reason),
+        daemon=True,
+    ).start()
+
+
+def _check_and_block_if_adult(url: str, domain: str, visited_at: str):
+    """Background thread: run Gemini classification; block if adult."""
     try:
-        result = classify(url, '', domain)
-        insert_urls([(
-            url, '', domain, visited_at,
+        result = classify(url, '', domain, gemini=True)
+        update_classification(
+            url, visited_at,
             1 if result.get('is_flagged') else 0,
             result.get('category', 'unclassified'),
             result.get('reason', ''),
             result.get('severity', 'low'),
+        )
+        if result.get('is_flagged') and result.get('category') == 'adult':
+            _block_adult_url(url, domain, result.get('reason', 'Adult content (Gemini)'))
+    except Exception as e:
+        log.error('[adult_check_bg] %s', e)
+
+
+def _on_url_from_watcher(url: str, domain: str, visited_at: str, is_incognito: bool = False):
+    try:
+        if is_incognito:
+            threading.Thread(
+                target=lambda: take_screenshot('incognito'),
+                daemon=True,
+            ).start()
+
+        # Fast classification (no Gemini — instant)
+        fast_result = classify(url, '', domain, gemini=False)
+        insert_urls([(
+            url, '', domain, visited_at,
+            1 if fast_result.get('is_flagged') else 0,
+            fast_result.get('category', 'unclassified'),
+            fast_result.get('reason', ''),
+            fast_result.get('severity', 'low'),
         )])
+
+        # If fast path already flagged as adult → block now, no need for Gemini
+        if fast_result.get('is_flagged') and fast_result.get('category') == 'adult':
+            _block_adult_url(url, domain, fast_result.get('reason', 'Adult content'))
+            return
+
+        # For unknown domains, run Gemini check in background
+        if fast_result.get('category') == 'unclassified':
+            threading.Thread(
+                target=_check_and_block_if_adult,
+                args=(url, domain, visited_at),
+                daemon=True,
+            ).start()
     except Exception as e:
         log.error('[url_watcher_cb] %s', e)
 
 
-url_watcher = UrlWatcher(_on_url_from_watcher, interval=5)
+url_watcher = UrlWatcher(_on_url_from_watcher)
 
 # ── Supabase remote sync ──────────────────────────────────────────────────────
 def _browser_state():
@@ -575,6 +627,10 @@ def action_settings(icon, item):
 def on_tray_ready(icon):
     icon.visible = True
     init_db()
+    if not hosts_is_installed():
+        log.warning('[startup] hosts file blocking NOT installed — run install.bat as admin')
+    else:
+        log.info('[startup] hosts file blocking active')
     threading.Thread(target=_browser_watch_loop,    daemon=True).start()
     threading.Thread(target=_roblox_watch_loop,     daemon=True).start()
     threading.Thread(target=_history_sync_loop,     daemon=True).start()

@@ -1,0 +1,20 @@
+Windows Registry Editor Version 5.00
+
+; Browser Guardian — Chrome per-user policies (HKCU, no admin needed)
+; Applies to the account that runs this .reg file (son's account)
+
+; Disable DNS-over-HTTPS so hosts file blocking works
+[HKEY_CURRENT_USER\SOFTWARE\Policies\Google\Chrome]
+"DnsOverHttpsMode"="off"
+
+; Force SafeSearch on Google
+[HKEY_CURRENT_USER\SOFTWARE\Policies\Google\Chrome]
+"ForceGoogleSafeSearch"=dword:00000001
+
+; Force SafeSearch on YouTube (restricted mode)
+[HKEY_CURRENT_USER\SOFTWARE\Policies\Google\Chrome]
+"ForceYouTubeRestrict"=dword:00000002
+
+; Disable incognito mode
+[HKEY_CURRENT_USER\SOFTWARE\Policies\Google\Chrome]
+"IncognitoModeAvailability"=dword:00000001

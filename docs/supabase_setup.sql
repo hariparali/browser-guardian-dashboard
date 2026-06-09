@@ -37,3 +37,21 @@ create policy "anon_all_remote_commands"
   on remote_commands for all
   using (true)
   with check (true);
+
+-- 3. Blocked attempts (desktop app writes when adult content is blocked)
+create table if not exists blocked_attempts (
+  id         bigserial primary key,
+  device_id  text not null,
+  domain     text not null,
+  url        text,
+  reason     text,
+  timestamp  timestamptz default now()
+);
+
+alter table blocked_attempts enable row level security;
+
+drop policy if exists "anon_all_blocked_attempts" on blocked_attempts;
+create policy "anon_all_blocked_attempts"
+  on blocked_attempts for all
+  using (true)
+  with check (true);

@@ -25,6 +25,8 @@ _ADDRESS_BAR_NAMES = (
     'Address and search bar',   # Chrome (normal + incognito)
     'Address bar',              # Edge (normal + InPrivate)
 )
+# Title substrings that identify private/incognito windows
+_INCOGNITO_MARKERS = ('incognito', 'inprivate', 'private')
 
 
 def _get_domain(url: str) -> str:
@@ -47,13 +49,13 @@ def _normalise_url(text: str) -> str:
     return 'https://' + text
 
 
-def _read_active_url() -> str | None:
+def _read_active_url() -> tuple[str, bool] | tuple[None, bool]:
     """
-    Walk all top-level Chrome/Edge windows and return the URL
-    from the focused/first address bar found.
+    Walk all top-level Chrome/Edge windows.
+    Returns (url, is_incognito) for the first URL found, or (None, False).
     """
     if not _AUTO_AVAILABLE:
-        return None
+        return None, False
     try:
         desktop = auto.GetRootControl()
         for win in desktop.GetChildren():
@@ -66,23 +68,25 @@ def _read_active_url() -> str | None:
                         continue
                     val = edit.GetValuePattern().Value.strip()
                     if _looks_like_url(val):
-                        return _normalise_url(val)
+                        title_lower = win.Name.lower() if win.Name else ''
+                        is_incognito = any(m in title_lower for m in _INCOGNITO_MARKERS)
+                        return _normalise_url(val), is_incognito
                 except Exception:
                     continue
     except Exception as e:
         # -2147220991 = COM "event unable to invoke subscribers" — transient, ignore silently
         if '-2147220991' not in str(e):
             log.debug('[url_watcher] read error: %s', e)
-    return None
+    return None, False
 
 
 class UrlWatcher:
     """
     Polls the browser address bar every `interval` seconds.
-    Calls `on_new_url(url, domain, visited_at)` when a new URL is detected.
+    Calls `on_new_url(url, domain, visited_at, is_incognito)` when a new URL is detected.
     """
 
-    def __init__(self, on_new_url, interval=5):
+    def __init__(self, on_new_url, interval=1.5):
         self._on_new_url = on_new_url
         self._interval = interval
         self._last_url = None
@@ -93,7 +97,7 @@ class UrlWatcher:
             log.warning('[url_watcher] not starting — uiautomation unavailable')
             return
         self._running = True
-        log.info('[url_watcher] started (interval=%ds)', self._interval)
+        log.info('[url_watcher] started (interval=%.1fs)', self._interval)
         threading.Thread(target=self._loop, daemon=True).start()
 
     def stop(self):
@@ -108,13 +112,14 @@ class UrlWatcher:
             pass
         while self._running:
             try:
-                url = _read_active_url()
+                url, is_incognito = _read_active_url()
                 if url and url != self._last_url:
                     self._last_url = url
                     domain = _get_domain(url)
                     visited_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-                    log.info('[url_watcher] captured: %s', domain)
-                    self._on_new_url(url, domain, visited_at)
+                    mode = 'incognito' if is_incognito else 'normal'
+                    log.info('[url_watcher] captured (%s): %s', mode, domain)
+                    self._on_new_url(url, domain, visited_at, is_incognito)
             except Exception as e:
                 log.error('[url_watcher] loop error: %s', e)
             time.sleep(self._interval)

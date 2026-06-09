@@ -1,0 +1,6 @@
+Windows Registry Editor Version 5.00
+
+; Browser Guardian — Remove Chrome per-user policies (HKCU)
+; Run this in son's account to undo policy changes
+
+[-HKEY_CURRENT_USER\SOFTWARE\Policies\Google\Chrome]

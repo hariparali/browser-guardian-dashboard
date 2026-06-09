@@ -6,6 +6,7 @@ Hybrid URL classifier:
 import json
 import os
 import re
+from urllib.parse import urlparse, parse_qs, unquote_plus
 
 # ── Rule-based domain table ───────────────────────────────────────────────
 # Format: 'domain': ('category', 'reason', 'severity')
@@ -75,6 +76,85 @@ _ADULT_KEYWORDS = [
     'porn', 'xxx', 'adult', r'\bsex\b', 'nude', 'erotic',
     'hentai', 'nsfw', 'onlyfans', 'fetish', 'escort',
 ]
+
+# Search engines whose ?q= param must be evaluated separately
+_SEARCH_DOMAINS = {'google.com', 'bing.com', 'duckduckgo.com', 'yahoo.com', 'yandex.com'}
+
+# Keywords for raw search query text (broader than domain keywords)
+_QUERY_ADULT_KEYWORDS = [
+    r'\bporn\b', r'\bporno\b', r'\bxxx\b', r'\bnude\b', r'\bnudes\b',
+    r'\bnaked\b', r'\bsex\b', r'\bsexed\b', r'\bsexual\b', r'\bsexually\b',
+    r'\berotic\b', r'\bhentai\b', r'\bnsfw\b', r'\bonlyfans\b',
+    r'\bfetish\b', r'\bboobs\b', r'\bvagina\b', r'\bpenis\b',
+    r'\bfuck\b', r'\bfucking\b', r'\bbusty\b', r'\bmilf\b',
+]
+
+
+def _extract_search_query(url: str) -> str | None:
+    """Extract the ?q= search query from a search engine URL."""
+    try:
+        qs = parse_qs(urlparse(url).query)
+        raw = qs.get('q', [None])[0]
+        return unquote_plus(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _classify_search_query(query: str, gemini: bool = True) -> dict | None:
+    """
+    Check a raw search query string for adult content.
+    Returns a flagged result dict if adult, None if safe/unknown.
+    Never cached — each query is independent.
+    """
+    for kw in _QUERY_ADULT_KEYWORDS:
+        if re.search(kw, query, re.IGNORECASE):
+            return {
+                'is_flagged': True,
+                'category': 'adult',
+                'reason': 'Adult content in search query',
+                'severity': 'high',
+            }
+
+    if not gemini:
+        return None
+
+    model = _get_gemini_model()
+    if model is None:
+        return None
+
+    prompt = (
+        'You are a content-safety classifier for a parental control app. Child is 13 years old.\n'
+        'Is this web search query looking for adult or pornographic content?\n\n'
+        f'Search query: {query}\n\n'
+        'Reply ONLY with JSON: {"is_adult": true or false, "reason": "brief reason under 60 chars"}'
+    )
+    try:
+        resp = model.generate_content(prompt)
+        try:
+            text = resp.text.strip()
+        except Exception:
+            # Gemini safety block on the query itself is itself an adult signal
+            return {
+                'is_flagged': True,
+                'category': 'adult',
+                'reason': 'Search query blocked by safety filter',
+                'severity': 'high',
+            }
+        if '```' in text:
+            text = text.split('```')[1]
+            if text.startswith('json'):
+                text = text[4:]
+        data = json.loads(text.strip())
+        if data.get('is_adult'):
+            return {
+                'is_flagged': True,
+                'category': 'adult',
+                'reason': data.get('reason', 'Adult search query')[:60],
+                'severity': 'high',
+            }
+    except Exception:
+        pass
+    return None
 
 _gemini_model = None
 _cache: dict = {}
@@ -184,7 +264,13 @@ def _gemini_classify(url: str, title: str, domain: str):
         resp = model.generate_content(
             _GEMINI_PROMPT.format(url=url, title=title, domain=domain)
         )
-        text = resp.text.strip()
+        try:
+            text = resp.text.strip()
+        except Exception:
+            # .text accessor failed — Gemini's safety filter blocked the response.
+            # A safety block on a URL is itself a strong adult-content signal.
+            return {'is_flagged': True, 'category': 'adult',
+                    'reason': 'Blocked by Gemini safety filter', 'severity': 'high'}
         if '```' in text:
             text = text.split('```')[1]
             if text.startswith('json'):
@@ -205,6 +291,15 @@ def classify(url: str, title: str = '', domain: str = '', gemini: bool = True) -
     Pass gemini=False for the fast path (no API calls, unknown → unclassified).
     Results cached per domain for the lifetime of the process.
     """
+    # For search engines, evaluate the query string — domain is "safe" but query might not be.
+    # Do this BEFORE the domain cache so each query is evaluated independently.
+    if _strip_www(domain) in _SEARCH_DOMAINS:
+        query = _extract_search_query(url)
+        if query:
+            flagged = _classify_search_query(query, gemini=gemini)
+            if flagged:
+                return flagged  # Don't cache — every query URL is different
+
     cache_key = domain or url
     if cache_key in _cache:
         return _cache[cache_key]
