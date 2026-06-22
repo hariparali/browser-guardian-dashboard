@@ -184,21 +184,24 @@ def _show_password_dialog(subject='Browser', on_correct=None, on_timeout=None):
 
 # ── Timer / browser event callbacks ──────────────────────────────────────────
 def _on_timer_expired():
+    log.info('[timer] browser timer expired — killing browser immediately')
+    kill_browsers()  # Kill immediately; don't wait for dialog countdown
     _set_icon('red')
     _show_password_dialog(
         subject='Browser',
         on_correct=_on_password_correct,
-        on_timeout=_on_password_timeout,
+        on_timeout=lambda: None,  # Browser already killed; nothing more to do
     )
 
 
 def _on_password_correct():
+    log.info('[timer] parent password accepted — starting new browser session')
     timer_mgr.start_new_session()
     _set_icon('green')
 
 
 def _on_password_timeout():
-    kill_browsers()
+    # Browser is already killed by _on_timer_expired; this is now a no-op
     _set_icon('red')
 
 
@@ -228,17 +231,21 @@ def _browser_watch_loop():
             if now_running and not was_running:
                 if timer_mgr.state == TimerState.IDLE:
                     # Very first launch — start fresh session
+                    log.info('[browser_watch] browser opened — starting new session (%dm)', config.get('timer_minutes', 30))
                     timer_mgr.start_new_session()
                     _set_icon('green')
                 elif timer_mgr.state == TimerState.PAUSED and timer_mgr.get_remaining() > 0:
+                    log.info('[browser_watch] browser reopened — resuming (%ds remaining)', timer_mgr.get_remaining())
                     timer_mgr.resume()
                     _set_icon('green')
                 elif timer_mgr.is_expired():
+                    log.info('[browser_watch] browser reopened after expiry — showing lock dialog')
                     _set_icon('red')
+                    kill_browsers()  # Kill immediately if reopened after expiry
                     _show_password_dialog(
                         subject='Browser',
                         on_correct=_on_password_correct,
-                        on_timeout=_on_password_timeout,
+                        on_timeout=lambda: None,
                     )
             elif not now_running and was_running:
                 if timer_mgr.state == TimerState.RUNNING:
