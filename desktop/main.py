@@ -9,14 +9,43 @@ Timer rules:
 - If the browser is reopened with 0 time → password dialog shown immediately.
 - Timer NEVER auto-restarts; only resets when the parent enters the correct password.
 """
-import threading
-import time
 import os
 import sys
+
+# ── Dialog-subprocess mode ─────────────────────────────────────────────────────
+# BrowserGuardian.exe --dialog <subject> <countdown_secs>
+# Runs as a child process to show the lock dialog without conflicting with the
+# pystray message loop in the parent process (Tkinter is not safe in threads).
+# Exit code: 0 = correct password, 1 = timeout / cancelled.
+if len(sys.argv) >= 4 and sys.argv[1] == '--dialog':
+    if getattr(sys, 'frozen', False):
+        _dlg_base = os.path.dirname(sys.executable)
+        sys.path.insert(0, _dlg_base)
+    from config import load_config as _load_cfg
+    from password_dialog import PasswordDialog as _PwdDlg
+    _dlg_cfg    = _load_cfg()
+    _dlg_result = [1]
+
+    def _dlg_correct():
+        _dlg_result[0] = 0
+
+    _PwdDlg(
+        countdown_secs=int(sys.argv[3]),
+        on_correct=_dlg_correct,
+        on_timeout=lambda: None,
+        get_password=lambda: _dlg_cfg['password'],
+        subject=sys.argv[2],
+    ).show()
+    sys.exit(_dlg_result[0])
+
+# ── Normal app imports (skipped when running as dialog subprocess) ─────────────
+import threading
+import time
 import socket
 import winreg
 import logging
 import traceback
+import subprocess
 from datetime import datetime, timedelta
 
 _DEVICE = socket.gethostname()
@@ -157,7 +186,7 @@ def remove_startup():
 
 # ── Password dialog helpers ───────────────────────────────────────────────────
 def _show_password_dialog(subject='Browser', on_correct=None, on_timeout=None):
-    """Show the lock password dialog; guard against duplicates."""
+    """Show the lock dialog in a subprocess to avoid Tkinter/pystray thread conflict."""
     global _dialog_open
     with _dialog_lock:
         if _dialog_open:
@@ -167,14 +196,33 @@ def _show_password_dialog(subject='Browser', on_correct=None, on_timeout=None):
     def run():
         global _dialog_open
         try:
-            dialog = PasswordDialog(
-                countdown_secs=config['auto_close_seconds'],
-                on_correct=on_correct,
-                on_timeout=on_timeout,
-                get_password=lambda: config['password'],
-                subject=subject,
+            exe = sys.executable  # BrowserGuardian.exe when frozen, python when dev
+            result = subprocess.run(
+                [exe, '--dialog', subject, str(config['auto_close_seconds'])],
+                timeout=config['auto_close_seconds'] + 60,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            dialog.show()
+            if result.returncode == 0:
+                if on_correct:
+                    try:
+                        on_correct()
+                    except Exception:
+                        pass
+            else:
+                if on_timeout:
+                    try:
+                        on_timeout()
+                    except Exception:
+                        pass
+        except subprocess.TimeoutExpired:
+            log.warning('[password_dialog] subprocess timed out')
+            if on_timeout:
+                try:
+                    on_timeout()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error('[password_dialog] subprocess error: %s', e)
         finally:
             with _dialog_lock:
                 _dialog_open = False
