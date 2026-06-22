@@ -138,15 +138,17 @@ def _set_icon(color):
 def _get_startup_cmd():
     """Return the command used to launch this script silently (no terminal window)."""
     if getattr(sys, 'frozen', False):
-        # Running as compiled EXE — register the EXE itself
+        exe_dir = os.path.dirname(sys.executable)
+        # Prefer the VBScript launcher so BrowserGuardian auto-restarts on crash
+        launcher = os.path.join(exe_dir, 'launcher.vbs')
+        if os.path.exists(launcher):
+            return f'"C:\\Windows\\System32\\wscript.exe" "{launcher}"'
         return f'"{sys.executable}"'
-    # Running from source — always prefer the compiled EXE if it exists,
-    # so the startup entry is stable and self-contained.
+    # Running from source — prefer the compiled EXE if it exists
     _src_dir = os.path.dirname(os.path.abspath(__file__))
     _exe = os.path.join(_src_dir, 'dist', 'BrowserGuardian', 'BrowserGuardian.exe')
     if os.path.exists(_exe):
         return f'"{_exe}"'
-    # Fallback: run source via pythonw (no console window)
     pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
     if not os.path.exists(pythonw):
         pythonw = sys.executable
@@ -682,6 +684,12 @@ def action_settings(icon, item):
 def on_tray_ready(icon):
     icon.visible = True
     init_db()
+    # Keep startup entry current (points to launcher.vbs for auto-restart on crash)
+    try:
+        register_startup()
+        log.info('[startup] startup registry entry updated')
+    except Exception as e:
+        log.warning('[startup] could not update startup registry: %s', e)
     if not hosts_is_installed():
         log.warning('[startup] hosts file blocking NOT installed — run install.bat as admin')
     else:
