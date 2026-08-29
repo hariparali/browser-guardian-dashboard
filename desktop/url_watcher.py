@@ -49,13 +49,24 @@ def _normalise_url(text: str) -> str:
     return 'https://' + text
 
 
-def _read_active_url() -> tuple[str, bool] | tuple[None, bool]:
+_TITLE_SUFFIXES = (' - Google Chrome', ' - Microsoft Edge')
+
+
+def _clean_title(window_name: str) -> str:
+    """Strip the trailing browser-chrome suffix Windows appends to the window title."""
+    for suffix in _TITLE_SUFFIXES:
+        if window_name.endswith(suffix):
+            return window_name[:-len(suffix)]
+    return window_name
+
+
+def _read_active_url() -> tuple[str, str, bool] | tuple[None, str, bool]:
     """
     Walk all top-level Chrome/Edge windows.
-    Returns (url, is_incognito) for the first URL found, or (None, False).
+    Returns (url, title, is_incognito) for the first URL found, or (None, '', False).
     """
     if not _AUTO_AVAILABLE:
-        return None, False
+        return None, '', False
     try:
         desktop = auto.GetRootControl()
         for win in desktop.GetChildren():
@@ -68,22 +79,24 @@ def _read_active_url() -> tuple[str, bool] | tuple[None, bool]:
                         continue
                     val = edit.GetValuePattern().Value.strip()
                     if _looks_like_url(val):
-                        title_lower = win.Name.lower() if win.Name else ''
+                        window_name = win.Name or ''
+                        title_lower = window_name.lower()
                         is_incognito = any(m in title_lower for m in _INCOGNITO_MARKERS)
-                        return _normalise_url(val), is_incognito
+                        title = _clean_title(window_name)
+                        return _normalise_url(val), title, is_incognito
                 except Exception:
                     continue
     except Exception as e:
         # -2147220991 = COM "event unable to invoke subscribers" — transient, ignore silently
         if '-2147220991' not in str(e):
             log.debug('[url_watcher] read error: %s', e)
-    return None, False
+    return None, '', False
 
 
 class UrlWatcher:
     """
     Polls the browser address bar every `interval` seconds.
-    Calls `on_new_url(url, domain, visited_at, is_incognito)` when a new URL is detected.
+    Calls `on_new_url(url, title, domain, visited_at, is_incognito)` when a new URL is detected.
     """
 
     def __init__(self, on_new_url, interval=1.5):
@@ -112,14 +125,14 @@ class UrlWatcher:
             pass
         while self._running:
             try:
-                url, is_incognito = _read_active_url()
+                url, title, is_incognito = _read_active_url()
                 if url and url != self._last_url:
                     self._last_url = url
                     domain = _get_domain(url)
                     visited_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
                     mode = 'incognito' if is_incognito else 'normal'
                     log.info('[url_watcher] captured (%s): %s', mode, domain)
-                    self._on_new_url(url, domain, visited_at, is_incognito)
+                    self._on_new_url(url, title, domain, visited_at, is_incognito)
             except Exception as e:
                 log.error('[url_watcher] loop error: %s', e)
             time.sleep(self._interval)

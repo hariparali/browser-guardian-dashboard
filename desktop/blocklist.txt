@@ -179,6 +179,9 @@ sexfinder.com
 rubratings.net
 slixa.com
 p411.com
+birchplace.com
+vivastreet.com
+adultwork.com
 
 # ── Known damplips / similar ──────────────────────────────────────────────────
 damplips.com

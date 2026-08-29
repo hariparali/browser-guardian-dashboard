@@ -6,7 +6,7 @@ Supabase remote sync for Browser Guardian.
 import socket
 import threading
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 
@@ -173,6 +173,24 @@ class SupabaseSync:
                 log.warning('[supabase_sync] push_blocked HTTP %s', resp.status_code)
         except Exception as e:
             log.warning('[supabase_sync] push_blocked error: %s', e)
+
+    # ── Log cleanup ───────────────────────────────────────────────────────────
+
+    def cleanup_old_logs(self, days: int = 14):
+        """Delete this device's device_logs rows older than `days` days."""
+        if not self._is_configured():
+            return
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            hdrs = self._headers()
+            hdrs['Prefer'] = 'return=minimal'
+            requests.delete(
+                self._url('device_logs'),
+                params={'device_id': f'eq.{DEVICE_ID}', 'ts': f'lt.{cutoff}'},
+                headers=hdrs, timeout=10,
+            )
+        except Exception as e:
+            log.warning('[supabase_sync] cleanup_old_logs error: %s', e)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 

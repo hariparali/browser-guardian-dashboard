@@ -38,15 +38,47 @@ if len(sys.argv) >= 4 and sys.argv[1] == '--dialog':
     ).show()
     sys.exit(_dlg_result[0])
 
+# ── Hosts-install subprocess mode ───────────────────────────────────────────────
+# BrowserGuardian.exe --install-hosts <blocklist.txt>
+# Lets setup scripts apply hosts-file SafeSearch/blocklist entries without
+# needing a separate system Python install — hosts_manager is already bundled
+# in this EXE, so a fresh PC needs nothing else to run this step.
+if len(sys.argv) >= 3 and sys.argv[1] == '--install-hosts':
+    if getattr(sys, 'frozen', False):
+        sys.path.insert(0, os.path.dirname(sys.executable))
+    from hosts_manager import install as _install_hosts
+    try:
+        _install_hosts(sys.argv[2])
+        print('Hosts file updated successfully.')
+        sys.exit(0)
+    except Exception as e:
+        print(f'Hosts install failed: {e}')
+        sys.exit(1)
+
 # ── Normal app imports (skipped when running as dialog subprocess) ─────────────
 import threading
 import time
+import queue
 import socket
 import winreg
 import logging
 import traceback
 import subprocess
+import requests
+import ctypes
 from datetime import datetime, timedelta
+
+# ── Single-instance guard ───────────────────────────────────────────────────
+# A double-click plus the startup Run-key entry firing (or two double-clicks)
+# can launch two independent tray processes, each with its own timer state —
+# they fight over kill_browsers()/kill_roblox() and give inconsistent results.
+# A named mutex ensures only one instance ever runs per Windows session.
+_SINGLE_INSTANCE_MUTEX_NAME = 'Local\\BrowserGuardianSingleInstance'
+_single_instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+    None, False, _SINGLE_INSTANCE_MUTEX_NAME
+)
+if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    sys.exit(0)
 
 _DEVICE = socket.gethostname()
 
@@ -102,6 +134,68 @@ from hosts_manager import is_installed as hosts_is_installed
 config = load_config()
 if config.get('gemini_api_key'):
     os.environ['GEMINI_API_KEY'] = config['gemini_api_key']
+
+
+# ── Cloud log mirror ────────────────────────────────────────────────────────
+# Mirrors log records to the `device_logs` Supabase table every ~10s, so logs
+# can be checked remotely without RDP/physical access to this PC. The local
+# file handler set up above remains the fallback source of record.
+class CloudLogHandler(logging.Handler):
+
+    def __init__(self, get_config, device_id):
+        super().__init__()
+        self._get_config = get_config
+        self._device_id  = device_id
+        self._queue      = queue.Queue()
+        threading.Thread(target=self._flush_loop, daemon=True).start()
+
+    def emit(self, record):
+        try:
+            self._queue.put_nowait({
+                'device_id': self._device_id,
+                'ts':        datetime.utcnow().isoformat(),
+                'level':     record.levelname,
+                'message':   self.format(record)[:2000],
+            })
+        except Exception:
+            pass
+
+    def _flush_loop(self):
+        while True:
+            time.sleep(10)
+            self._flush()
+
+    def _flush(self):
+        batch = []
+        while len(batch) < 200:
+            try:
+                batch.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        if not batch:
+            return
+        cfg = self._get_config()
+        url = cfg.get('supabase_url', '').rstrip('/')
+        key = cfg.get('supabase_key', '')
+        if not url or not key:
+            return
+        try:
+            requests.post(
+                url + '/rest/v1/device_logs', json=batch,
+                headers={
+                    'apikey': key, 'Authorization': f'Bearer {key}',
+                    'Content-Type': 'application/json', 'Prefer': 'return=minimal',
+                },
+                timeout=5,
+            )
+        except Exception:
+            pass  # Drop silently; local file log is the fallback of record
+
+
+_cloud_log_handler = CloudLogHandler(lambda: config, _DEVICE)
+_cloud_log_handler.setFormatter(logging.Formatter(f'%(asctime)s [{_DEVICE}] [%(levelname)s] %(message)s'))
+logging.getLogger().addHandler(_cloud_log_handler)
+
 cloud_sync = CloudSync(lambda: config)
 last_history_check = None
 tray_icon = None
@@ -257,19 +351,18 @@ def _on_password_timeout():
 
 # ── Roblox timer callbacks ────────────────────────────────────────────────────
 def _on_roblox_timer_expired():
+    log.info('[timer] roblox timer expired — killing roblox immediately')
+    kill_roblox()  # Kill immediately; don't wait for dialog countdown
     _show_password_dialog(
         subject='Roblox',
         on_correct=_on_roblox_password_correct,
-        on_timeout=_on_roblox_password_timeout,
+        on_timeout=lambda: None,  # Roblox already killed; nothing more to do
     )
 
 
 def _on_roblox_password_correct():
+    log.info('[timer] parent password accepted — starting new roblox session')
     roblox_timer_mgr.start_new_session()
-
-
-def _on_roblox_password_timeout():
-    kill_roblox()
 
 
 # ── Browser state watcher ─────────────────────────────────────────────────────
@@ -319,7 +412,13 @@ def _roblox_watch_loop():
                 elif roblox_timer_mgr.state == TimerState.PAUSED and roblox_timer_mgr.get_remaining() > 0:
                     roblox_timer_mgr.resume()
                 elif roblox_timer_mgr.is_expired():
-                    kill_roblox()
+                    log.info('[roblox_watch] roblox reopened after expiry — showing lock dialog')
+                    kill_roblox()  # Kill immediately if reopened after expiry
+                    _show_password_dialog(
+                        subject='Roblox',
+                        on_correct=_on_roblox_password_correct,
+                        on_timeout=lambda: None,
+                    )
             elif not now_running and was_running:
                 if roblox_timer_mgr.state == TimerState.RUNNING:
                     roblox_timer_mgr.pause()
@@ -340,10 +439,10 @@ def _block_adult_url(url: str, domain: str, reason: str):
     ).start()
 
 
-def _check_and_block_if_adult(url: str, domain: str, visited_at: str):
+def _check_and_block_if_adult(url: str, title: str, domain: str, visited_at: str):
     """Background thread: run Gemini classification; block if adult."""
     try:
-        result = classify(url, '', domain, gemini=True)
+        result = classify(url, title, domain, gemini=True)
         update_classification(
             url, visited_at,
             1 if result.get('is_flagged') else 0,
@@ -357,7 +456,7 @@ def _check_and_block_if_adult(url: str, domain: str, visited_at: str):
         log.error('[adult_check_bg] %s', e)
 
 
-def _on_url_from_watcher(url: str, domain: str, visited_at: str, is_incognito: bool = False):
+def _on_url_from_watcher(url: str, title: str, domain: str, visited_at: str, is_incognito: bool = False):
     try:
         if is_incognito:
             threading.Thread(
@@ -366,9 +465,9 @@ def _on_url_from_watcher(url: str, domain: str, visited_at: str, is_incognito: b
             ).start()
 
         # Fast classification (no Gemini — instant)
-        fast_result = classify(url, '', domain, gemini=False)
+        fast_result = classify(url, title, domain, gemini=False)
         insert_urls([(
-            url, '', domain, visited_at,
+            url, title, domain, visited_at,
             1 if fast_result.get('is_flagged') else 0,
             fast_result.get('category', 'unclassified'),
             fast_result.get('reason', ''),
@@ -384,7 +483,7 @@ def _on_url_from_watcher(url: str, domain: str, visited_at: str, is_incognito: b
         if fast_result.get('category') == 'unclassified':
             threading.Thread(
                 target=_check_and_block_if_adult,
-                args=(url, domain, visited_at),
+                args=(url, title, domain, visited_at),
                 daemon=True,
             ).start()
     except Exception as e:
@@ -509,6 +608,7 @@ def _midnight_reset_loop():
         except Exception:
             pass
         log.info('[midnight_reset] timers reset (%s)', today_str)
+        threading.Thread(target=supabase_sync.cleanup_old_logs, daemon=True).start()
 
     # ── Catch-up: did we miss midnight while the laptop was off? ──────────
     today = datetime.now().date()

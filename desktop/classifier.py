@@ -174,9 +174,16 @@ def _load_cache():
         return {}
 
 def _save_cache():
+    """
+    Persist only confirmed-flagged verdicts to disk. A Gemini "safe" guess can
+    be wrong (e.g. a generic-sounding domain judged with no page title) and
+    shouldn't permanently whitelist a domain across restarts — only what's
+    clearly flagged is safe to trust indefinitely.
+    """
     try:
+        persist = {k: v for k, v in _cache.items() if v.get('is_flagged')}
         with open(_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(_cache, f)
+            json.dump(persist, f)
     except Exception:
         pass
 
@@ -289,10 +296,12 @@ def classify(url: str, title: str = '', domain: str = '', gemini: bool = True) -
     """
     Classify a URL. Checks rules first, optionally falls back to Gemini.
     Pass gemini=False for the fast path (no API calls, unknown → unclassified).
-    Results cached per domain for the lifetime of the process.
+    Rule-based lookups are deterministic and never cached (cheap to recompute).
+    Gemini verdicts are cached per (domain, title) for the process lifetime —
+    not per domain alone, since different pages on the same domain (e.g. a
+    directory site) can have very different titles and very different content.
     """
     # For search engines, evaluate the query string — domain is "safe" but query might not be.
-    # Do this BEFORE the domain cache so each query is evaluated independently.
     if _strip_www(domain) in _SEARCH_DOMAINS:
         query = _extract_search_query(url)
         if query:
@@ -300,25 +309,23 @@ def classify(url: str, title: str = '', domain: str = '', gemini: bool = True) -
             if flagged:
                 return flagged  # Don't cache — every query URL is different
 
-    cache_key = domain or url
-    if cache_key in _cache:
-        return _cache[cache_key]
-
     rule = _rule_lookup(domain)
     if rule:
         cat, reason, sev = rule
-        result = {
+        return {
             'is_flagged': cat != 'safe',
             'category': cat,
             'reason': reason,
             'severity': sev,
         }
-        _cache[cache_key] = result
-        return result
 
     if not gemini:
         return {'is_flagged': False, 'category': 'unclassified',
                 'reason': '', 'severity': 'low'}
+
+    cache_key = f'{domain or url}::{title}'
+    if cache_key in _cache:
+        return _cache[cache_key]
 
     result = _gemini_classify(url, title, domain)
     if result is None:
