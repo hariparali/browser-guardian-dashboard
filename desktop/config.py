@@ -15,6 +15,8 @@ DEFAULT_CONFIG = {
     'roblox_timer_minutes': 30,
     'password': 'parent123',
     'auto_close_seconds': 30,
+    'roblox_warning_seconds': 60,  # save-your-progress warning before Roblox is force-closed
+    'enforcement_interval_secs': 30,  # safety-net poll: kill Chrome/Roblox if used while expired
     'supabase_url': '',
     'supabase_key': '',
     'gemini_api_key': '',

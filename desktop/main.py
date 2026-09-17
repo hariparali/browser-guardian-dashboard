@@ -55,9 +55,48 @@ if len(sys.argv) >= 3 and sys.argv[1] == '--install-hosts':
         print(f'Hosts install failed: {e}')
         sys.exit(1)
 
+# ── Warning-popup subprocess mode ─────────────────────────────────────────────
+# BrowserGuardian.exe --warn <subject> <seconds>
+# Shows a non-dismissible "save your progress" countdown, then exits. The parent
+# process does the actual force-close once this returns. Runs in its own process
+# so Tkinter never fights the pystray message loop.
+if len(sys.argv) >= 4 and sys.argv[1] == '--warn':
+    if getattr(sys, 'frozen', False):
+        sys.path.insert(0, os.path.dirname(sys.executable))
+    from warning_dialog import WarningDialog as _WarnDlg
+    try:
+        _WarnDlg(subject=sys.argv[2], countdown_secs=int(sys.argv[3])).show()
+    except Exception:
+        pass
+    sys.exit(0)
+
+# ── Blocked-launch subprocess mode ────────────────────────────────────────────
+# Invoked by Windows via the IFEO "Debugger" hook when a LOCKED Roblox exe is
+# launched — Windows runs this instead of Roblox, so Roblox never starts. We
+# just tell the child it's locked and exit; the real exe path is passed as
+# argv[2] but we deliberately do NOT run it.
+if len(sys.argv) >= 2 and sys.argv[1] == '--blocked-launch':
+    try:
+        import tkinter as _tk
+        from tkinter import messagebox as _mb
+        _r = _tk.Tk()
+        _r.withdraw()
+        _r.attributes('-topmost', True)
+        _mb.showinfo(
+            'Roblox Locked',
+            'Roblox time is over for today.\n\n'
+            'A parent can unlock it from the Browser Guardian tray icon,\n'
+            'or it will unlock automatically tomorrow.',
+        )
+        _r.destroy()
+    except Exception:
+        pass
+    sys.exit(0)
+
 # ── Normal app imports (skipped when running as dialog subprocess) ─────────────
 import threading
 import time
+import json
 import queue
 import socket
 import winreg
@@ -118,7 +157,10 @@ threading.excepthook = lambda args: log.critical(
 from config import load_config, save_config
 from db_manager import init_db, insert_urls, get_unsynced, mark_synced, update_classification, get_unclassified
 from history_reader import get_new_history
-from browser_monitor import is_browser_running, kill_browsers, is_roblox_running, kill_roblox
+from browser_monitor import (is_browser_running, kill_browsers, is_roblox_running,
+                             kill_roblox, force_kill_roblox, get_roblox_procs,
+                             roblox_proc_names, _ROBLOX_NAMES)
+import roblox_lock
 from timer_manager import TimerManager, TimerState
 from password_dialog import PasswordDialog
 from settings_dialog import SettingsDialog
@@ -201,6 +243,9 @@ last_history_check = None
 tray_icon = None
 _dialog_open = False
 _dialog_lock = threading.Lock()
+# True while the 60s "save your progress" warning is on screen, so the watch
+# loop won't force-close Roblox early if it briefly drops out of detection.
+_roblox_warning_active = False
 
 _STARTUP_REG_KEY  = r'Software\Microsoft\Windows\CurrentVersion\Run'
 _STARTUP_APP_NAME = 'BrowserGuardian'
@@ -250,6 +295,10 @@ def _get_startup_cmd():
 
 
 def is_registered_at_startup():
+    # Startup can be either the HKCU Run key (non-elevated PCs) or the elevated
+    # scheduled task (admin PCs) — treat either as "registered".
+    if _elevated_task_exists():
+        return True
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_REG_KEY, 0,
                              winreg.KEY_READ)
@@ -269,8 +318,23 @@ def register_startup():
     winreg.CloseKey(key)
 
 
+_ELEVATED_TASK_NAME = 'BrowserGuardianElevated'
+
+
+def _elevated_task_exists():
+    """True if the elevated ONLOGON scheduled task is registered."""
+    try:
+        r = subprocess.run(
+            ['schtasks', '/query', '/tn', _ELEVATED_TASK_NAME],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def remove_startup():
-    """Remove app from Windows startup registry."""
+    """Remove app from Windows startup (HKCU Run key AND the elevated task)."""
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_REG_KEY, 0,
                              winreg.KEY_SET_VALUE)
@@ -278,6 +342,12 @@ def remove_startup():
         winreg.CloseKey(key)
     except FileNotFoundError:
         pass  # Already removed
+    # Also delete the elevated scheduled task if present (needs elevation).
+    try:
+        subprocess.run(['schtasks', '/delete', '/tn', _ELEVATED_TASK_NAME, '/f'],
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        pass
 
 
 # ── Password dialog helpers ───────────────────────────────────────────────────
@@ -350,18 +420,54 @@ def _on_password_timeout():
 
 
 # ── Roblox timer callbacks ────────────────────────────────────────────────────
+def _run_warning(subject, secs):
+    """Block until the countdown warning popup (a subprocess) finishes."""
+    try:
+        subprocess.run(
+            [sys.executable, '--warn', subject, str(secs)],
+            timeout=secs + 30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception as e:
+        log.error('[warning_dialog] %s', e)
+
+
+def _lock_roblox_now():
+    """Abruptly force-close Roblox (no dialog) AND block it from relaunching."""
+    # Engage the launch-block FIRST. Roblox can relaunch itself the instant it's
+    # killed; if we blocked only afterwards, that respawn (started in the gap)
+    # would slip through — which is exactly what happened on 2026-09-13. Blocking
+    # first means any respawn is stopped at launch. Needs elevation; degrades to
+    # kill-on-sight (enforcement loop) if not elevated.
+    roblox_lock.engage_lock(set(_ROBLOX_NAMES))
+    _killed, names = force_kill_roblox()
+    # If the running exe had a name we didn't know statically, block it too.
+    extra = set(n.lower() for n in names if n) - set(_ROBLOX_NAMES)
+    if extra:
+        roblox_lock.engage_lock(set(_ROBLOX_NAMES) | extra)
+
+
 def _on_roblox_timer_expired():
-    log.info('[timer] roblox timer expired — killing roblox immediately')
-    kill_roblox()  # Kill immediately; don't wait for dialog countdown
-    _show_password_dialog(
-        subject='Roblox',
-        on_correct=_on_roblox_password_correct,
-        on_timeout=lambda: None,  # Roblox already killed; nothing more to do
-    )
+    warn = int(config.get('roblox_warning_seconds', 60))
+    log.info('[timer] roblox timer expired — %ss save warning before force-close', warn)
+
+    def warn_then_lock():
+        global _roblox_warning_active
+        try:
+            if warn > 0:
+                _roblox_warning_active = True
+                _run_warning('Roblox', warn)
+        finally:
+            _roblox_warning_active = False
+        log.info('[timer] warning elapsed — force-closing roblox + engaging launch-block')
+        _lock_roblox_now()
+
+    threading.Thread(target=warn_then_lock, daemon=True).start()
 
 
 def _on_roblox_password_correct():
-    log.info('[timer] parent password accepted — starting new roblox session')
+    log.info('[timer] parent password accepted — unlocking + starting new roblox session')
+    roblox_lock.release_lock()
     roblox_timer_mgr.start_new_session()
 
 
@@ -405,20 +511,26 @@ def _roblox_watch_loop():
     was_running = False
     while True:
         try:
-            now_running = is_roblox_running()
+            procs = get_roblox_procs()
+            now_running = bool(procs)
             if now_running and not was_running:
+                log.info('[roblox_watch] roblox detected: %s (timer state=%s)',
+                         roblox_proc_names(procs), roblox_timer_mgr.state)
                 if roblox_timer_mgr.state == TimerState.IDLE:
                     roblox_timer_mgr.start_new_session()
                 elif roblox_timer_mgr.state == TimerState.PAUSED and roblox_timer_mgr.get_remaining() > 0:
                     roblox_timer_mgr.resume()
                 elif roblox_timer_mgr.is_expired():
-                    log.info('[roblox_watch] roblox reopened after expiry — showing lock dialog')
-                    kill_roblox()  # Kill immediately if reopened after expiry
-                    _show_password_dialog(
-                        subject='Roblox',
-                        on_correct=_on_roblox_password_correct,
-                        on_timeout=lambda: None,
-                    )
+                    if _roblox_warning_active:
+                        # Save-progress warning is on screen — leave Roblox
+                        # running until the countdown finishes.
+                        pass
+                    else:
+                        # Already expired + warned. No second warning, no kid
+                        # password prompt — just abruptly close and (re)assert
+                        # the launch-block. Parent unlocks via tray/dashboard.
+                        log.info('[roblox_watch] roblox launched while locked — force-closing')
+                        _lock_roblox_now()
             elif not now_running and was_running:
                 if roblox_timer_mgr.state == TimerState.RUNNING:
                     roblox_timer_mgr.pause()
@@ -426,6 +538,31 @@ def _roblox_watch_loop():
         except Exception as e:
             log.error('[roblox_watch] %s', e)
         time.sleep(2)
+
+
+# ── Enforcement safety-net poll ───────────────────────────────────────────────
+def _enforcement_loop():
+    """State-based safety net (independent of the edge-triggered watch loops).
+
+    Every `enforcement_interval_secs`, if a timer is EXPIRED but its app is still
+    running, force it closed. Catches anything the 2s edge loops miss — a partial
+    kill, a process that never fully died, or a kill that raced a fast reopen.
+    """
+    interval = max(10, int(config.get('enforcement_interval_secs', 30)))
+    log.info('[enforce] safety-net poll started (every %ds)', interval)
+    while True:
+        try:
+            if timer_mgr.is_expired() and is_browser_running():
+                log.info('[enforce] browser running while time is up — killing')
+                kill_browsers()
+            # Skip Roblox while the save-progress warning is on screen.
+            if (roblox_timer_mgr.is_expired() and not _roblox_warning_active
+                    and is_roblox_running()):
+                log.info('[enforce] roblox running while time is up — force-closing + lock')
+                _lock_roblox_now()
+        except Exception as e:
+            log.error('[enforce] %s', e)
+        time.sleep(interval)
 
 
 # ── UI Automation URL watcher ─────────────────────────────────────────────────
@@ -504,16 +641,30 @@ def _remote_block_browser():
     timer_mgr.force_block()
 
 def _remote_block_roblox():
-    kill_roblox()
     roblox_timer_mgr.force_block()
+    _lock_roblox_now()  # abrupt close + launch-block
+
+def _extend_browser(secs):
+    timer_mgr.add_time(secs)
+    # add_time on an EXPIRED timer leaves it PAUSED; the watch loop only resumes
+    # on a fresh open. If the app is already running (never closed), resume now
+    # so the new time actually starts counting down (and will expire → close).
+    if is_browser_running():
+        timer_mgr.resume()
+
+def _extend_roblox(secs):
+    roblox_lock.release_lock()  # grant time → allow launching again
+    roblox_timer_mgr.add_time(secs)
+    if is_roblox_running():
+        roblox_timer_mgr.resume()
 
 def _remote_show_message(message):
     threading.Thread(target=lambda: MessageDialog(message).show(), daemon=True).start()
 
 supabase_sync = SupabaseSync(lambda: config, _browser_state, _roblox_state)
 supabase_sync.set_extend_callbacks(
-    extend_browser=lambda secs: timer_mgr.add_time(secs),
-    extend_roblox=lambda secs: roblox_timer_mgr.add_time(secs),
+    extend_browser=_extend_browser,
+    extend_roblox=_extend_roblox,
 )
 supabase_sync.set_action_callbacks(
     block_browser=_remote_block_browser,
@@ -589,6 +740,54 @@ def _gemini_classify_loop():
         time.sleep(60)
 
 
+# ── Timer persistence (survive reboots) ──────────────────────────────────────
+# Without this, a reboot reconstructs both timers as IDLE/full — so a child
+# could reboot to get a fresh allowance. We snapshot remaining time + date and
+# restore today's leftover on startup instead of granting a new session.
+_TIMER_STATE_FILE = os.path.join(_BASE, 'timer_state.json')
+
+
+def _save_timer_state():
+    try:
+        data = {
+            'date':              datetime.now().date().isoformat(),
+            'browser_state':     timer_mgr.state,
+            'browser_remaining': timer_mgr.get_remaining(),
+            'roblox_state':      roblox_timer_mgr.state,
+            'roblox_remaining':  roblox_timer_mgr.get_remaining(),
+        }
+        with open(_TIMER_STATE_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.debug('[persist] save failed: %s', e)
+
+
+def _load_timer_state():
+    """Restore today's leftover time on startup. Only applies if the saved
+    snapshot is from today; a new day falls through to the normal fresh/nightly
+    allowance."""
+    try:
+        with open(_TIMER_STATE_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return
+    if data.get('date') != datetime.now().date().isoformat():
+        return  # Stale (previous day) — let nightly/catch-up grant full time
+    timer_mgr.restore_state(data.get('browser_state', 'idle'),
+                            int(data.get('browser_remaining', 0)))
+    roblox_timer_mgr.restore_state(data.get('roblox_state', 'idle'),
+                                   int(data.get('roblox_remaining', 0)))
+    log.info('[persist] restored today\'s timers — browser=%ss%s roblox=%ss%s',
+             timer_mgr.get_remaining(), ' (expired)' if timer_mgr.is_expired() else '',
+             roblox_timer_mgr.get_remaining(), ' (expired)' if roblox_timer_mgr.is_expired() else '')
+
+
+def _timer_persist_loop():
+    while True:
+        time.sleep(15)
+        _save_timer_state()
+
+
 # ── Nightly reset ────────────────────────────────────────────────────────────
 _RESET_FILE = os.path.join(_BASE, 'last_reset.txt')
 
@@ -601,6 +800,7 @@ def _midnight_reset_loop():
     def _do_reset():
         timer_mgr.reset_to_idle()
         roblox_timer_mgr.reset_to_idle()
+        roblox_lock.release_lock()  # new day → Roblox is allowed to launch again
         today_str = datetime.now().date().isoformat()
         try:
             with open(_RESET_FILE, 'w') as f:
@@ -608,6 +808,7 @@ def _midnight_reset_loop():
         except Exception:
             pass
         log.info('[midnight_reset] timers reset (%s)', today_str)
+        _save_timer_state()  # capture the fresh full-allowance snapshot for today
         threading.Thread(target=supabase_sync.cleanup_old_logs, daemon=True).start()
 
     # ── Catch-up: did we miss midnight while the laptop was off? ──────────
@@ -648,6 +849,7 @@ def _do_kill_switch(remove_from_startup: bool):
     timer_mgr.stop()
     url_watcher.stop()
     supabase_sync.stop()
+    roblox_lock.release_lock()  # don't leave Roblox blocked after we exit
 
     # 2. Remove from Windows startup registry if requested
     if remove_from_startup:
@@ -755,7 +957,7 @@ def action_status(icon, item):
 
 
 def action_toggle_startup(icon, item):
-    def run():
+    def do_toggle():
         import tkinter as tk
         from tkinter import messagebox
         root = tk.Tk()
@@ -767,27 +969,158 @@ def action_toggle_startup(icon, item):
             register_startup()
             messagebox.showinfo('Startup', 'Added to Windows startup.')
         root.destroy()
+
+    # Password-gated: otherwise the child could disable auto-start.
+    _gate_with_password(
+        'Startup (Parent)',
+        'Enter the parent password to change the startup setting.',
+        lambda: threading.Thread(target=do_toggle, daemon=True).start(),
+    )
+
+
+def _gate_with_password(title, subtitle, on_ok):
+    """Show a password prompt; run on_ok() only if the parent password matches.
+
+    Used to protect tray actions a child must not reach (Settings, Startup).
+    """
+    def run():
+        import tkinter as tk
+        from tkinter import ttk
+        root = tk.Tk()
+        root.title(title)
+        root.geometry('380x185')
+        root.resizable(False, False)
+        root.attributes('-topmost', True)
+        root.eval('tk::PlaceWindow . center')
+
+        frame = ttk.Frame(root, padding=24)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text=title, font=('Segoe UI', 13, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text=subtitle, font=('Segoe UI', 9),
+                  wraplength=320).pack(anchor='w', pady=(4, 12))
+
+        pwd_var = tk.StringVar()
+        entry = ttk.Entry(frame, textvariable=pwd_var, show='*',
+                          font=('Segoe UI', 12), width=26)
+        entry.pack(pady=(0, 8))
+        entry.focus_set()
+        status_var = tk.StringVar()
+        ttk.Label(frame, textvariable=status_var, foreground='red',
+                  font=('Segoe UI', 9)).pack()
+
+        def confirm():
+            if pwd_var.get() == config['password']:
+                root.destroy()
+                try:
+                    on_ok()
+                except Exception as e:
+                    log.error('[password_gate] on_ok failed: %s', e)
+            else:
+                status_var.set('Incorrect password.')
+                pwd_var.set('')
+
+        entry.bind('<Return>', lambda _: confirm())
+        btns = tk.Frame(frame)
+        btns.pack(pady=10)
+        ttk.Button(btns, text='OK', command=confirm).pack(side='left', padx=6)
+        ttk.Button(btns, text='Cancel', command=root.destroy).pack(side='left', padx=6)
+        root.protocol('WM_DELETE_WINDOW', root.destroy)
+        root.after(100, root.focus_force)
+        root.mainloop()
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def action_unlock_roblox(icon, item):
+    """Tray menu: parent enters password → release launch-block + fresh session."""
+    def run():
+        import tkinter as tk
+        from tkinter import ttk
+        root = tk.Tk()
+        root.title('Unlock Roblox')
+        root.geometry('380x200')
+        root.resizable(False, False)
+        root.attributes('-topmost', True)
+        root.eval('tk::PlaceWindow . center')
+
+        frame = ttk.Frame(root, padding=24)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Unlock Roblox', font=('Segoe UI', 13, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='Enter the parent password to allow Roblox again '
+                  'and start a fresh session.', font=('Segoe UI', 9),
+                  wraplength=320).pack(anchor='w', pady=(4, 12))
+
+        pwd_var = tk.StringVar()
+        entry = ttk.Entry(frame, textvariable=pwd_var, show='*',
+                          font=('Segoe UI', 12), width=26)
+        entry.pack(pady=(0, 8))
+        entry.focus_set()
+        status_var = tk.StringVar()
+        ttk.Label(frame, textvariable=status_var, foreground='red',
+                  font=('Segoe UI', 9)).pack()
+
+        def confirm():
+            if pwd_var.get() == config['password']:
+                root.destroy()
+                log.info('[unlock_roblox] parent unlocked Roblox from tray')
+                roblox_lock.release_lock()
+                roblox_timer_mgr.start_new_session()
+            else:
+                status_var.set('Incorrect password.')
+                pwd_var.set('')
+
+        entry.bind('<Return>', lambda _: confirm())
+        btns = tk.Frame(frame)
+        btns.pack(pady=10)
+        ttk.Button(btns, text='Unlock', command=confirm).pack(side='left', padx=6)
+        ttk.Button(btns, text='Cancel', command=root.destroy).pack(side='left', padx=6)
+        root.protocol('WM_DELETE_WINDOW', root.destroy)
+        root.after(100, root.focus_force)
+        root.mainloop()
+
     threading.Thread(target=run, daemon=True).start()
 
 
 def action_settings(icon, item):
-    def on_save(new_cfg):
-        global config
-        config.update(new_cfg)
-        save_config(config)
+    def open_settings():
+        def on_save(new_cfg):
+            global config
+            config.update(new_cfg)
+            save_config(config)
+        dialog = SettingsDialog(config, on_save)
+        threading.Thread(target=dialog.show, daemon=True).start()
 
-    dialog = SettingsDialog(config, on_save)
-    threading.Thread(target=dialog.show, daemon=True).start()
+    # Password-gated: otherwise the child could raise their own time limit.
+    _gate_with_password(
+        'Settings (Parent)',
+        'Enter the parent password to open Settings.',
+        open_settings,
+    )
 
 
 # ── Tray setup ────────────────────────────────────────────────────────────────
 def on_tray_ready(icon):
     icon.visible = True
     init_db()
-    # Keep startup entry current (points to launcher.vbs for auto-restart on crash)
+    log.info('[startup] elevated=%s roblox_locked=%s',
+             roblox_lock.is_elevated(), roblox_lock.is_locked())
+    # Restore today's leftover time BEFORE the watch loops start, so a reboot
+    # can't hand out a fresh allowance.
+    _load_timer_state()
+    # Startup registration:
+    #   - If the elevated ONLOGON scheduled task exists, it already launches us
+    #     as admin at login. Also having the HKCU Run-key entry would start a
+    #     SECOND, non-elevated instance that could win the single-instance mutex
+    #     first and leave us un-elevated. So drop the Run key in that case.
+    #   - Otherwise keep the Run-key entry (points to launcher.vbs for crash
+    #     auto-restart) as before.
     try:
-        register_startup()
-        log.info('[startup] startup registry entry updated')
+        if _elevated_task_exists():
+            remove_startup()
+            log.info('[startup] elevated scheduled task present — HKCU Run-key disabled')
+        else:
+            register_startup()
+            log.info('[startup] startup registry entry updated (non-elevated launch)')
     except Exception as e:
         log.warning('[startup] could not update startup registry: %s', e)
     if not hosts_is_installed():
@@ -796,9 +1129,11 @@ def on_tray_ready(icon):
         log.info('[startup] hosts file blocking active')
     threading.Thread(target=_browser_watch_loop,    daemon=True).start()
     threading.Thread(target=_roblox_watch_loop,     daemon=True).start()
+    threading.Thread(target=_enforcement_loop,      daemon=True).start()
     threading.Thread(target=_history_sync_loop,     daemon=True).start()
     threading.Thread(target=_gemini_classify_loop,  daemon=True).start()
     threading.Thread(target=_midnight_reset_loop,   daemon=True).start()
+    threading.Thread(target=_timer_persist_loop,    daemon=True).start()
     url_watcher.start()
     supabase_sync.start()
 
@@ -809,6 +1144,7 @@ roblox_timer_mgr = TimerManager(_on_roblox_timer_expired, lambda: config, timer_
 
 menu = pystray.Menu(
     pystray.MenuItem('Status / Time Remaining', action_status),
+    pystray.MenuItem('Unlock Roblox (Parent)',  action_unlock_roblox),
     pystray.MenuItem('Settings',                action_settings),
     pystray.MenuItem(
         lambda item: 'Disable Startup' if is_registered_at_startup() else 'Enable Startup',

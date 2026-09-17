@@ -49,14 +49,22 @@ echo   Target account: %LOGON_ACCOUNT%  (SID %LOGON_SID%)
 set "HIVE=HKU\%LOGON_SID%"
 echo.
 
-REM 1. Register auto-start (launches on every login for the target account)
-echo [1/5] Registering startup...
-reg add "%HIVE%\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "BrowserGuardian" /t REG_SZ /d "\"C:\Windows\System32\wscript.exe\" \"C:\BrowserGuardian\launcher.vbs\"" /f
+REM 1. Register auto-start as an ELEVATED scheduled task (ONLOGON, highest
+REM    privileges). Running elevated is REQUIRED so BrowserGuardian can:
+REM      - hard-kill Roblox (Byfron anti-cheat blocks a non-elevated kill), and
+REM      - write the IFEO launch-block that stops Roblox starting after time is up.
+REM    NOTE: elevation only actually happens if %LOGON_ACCOUNT% is a member of
+REM    Administrators. For a Standard User the task still runs but NOT elevated.
+echo [1/5] Registering elevated auto-start task...
+schtasks /create /f /tn "BrowserGuardianElevated" /rl HIGHEST /sc ONLOGON /ru "%LOGON_ACCOUNT%" /tr "\"C:\Windows\System32\wscript.exe\" \"C:\BrowserGuardian\launcher.vbs\""
 if %errorlevel% neq 0 (
-    echo FAILED - could not write to registry
+    echo FAILED - could not create scheduled task
     pause
     exit /b 1
 )
+REM Remove any old HKCU Run-key entry so we don't ALSO launch a second,
+REM non-elevated instance that could win the single-instance lock first.
+reg delete "%HIVE%\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "BrowserGuardian" /f >nul 2>&1
 echo       OK
 
 REM 2. Chrome SafeSearch + disable incognito + disable DoH
@@ -88,9 +96,13 @@ if exist "C:\BrowserGuardian\BrowserGuardian.exe" if exist "C:\BrowserGuardian\b
     echo       SKIPPED - BrowserGuardian.exe or blocklist.txt not found ^(non-critical^)
 )
 
-REM 5. Launch BrowserGuardian now
-echo [5/5] Starting BrowserGuardian...
-start "" "C:\Windows\System32\wscript.exe" "C:\BrowserGuardian\launcher.vbs"
+REM 5. Launch BrowserGuardian now (via the task, so it starts ELEVATED)
+echo [5/5] Starting BrowserGuardian (elevated)...
+schtasks /run /tn "BrowserGuardianElevated" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo       Task run failed - falling back to direct launch
+    start "" "C:\Windows\System32\wscript.exe" "C:\BrowserGuardian\launcher.vbs"
+)
 echo       OK
 
 echo.
