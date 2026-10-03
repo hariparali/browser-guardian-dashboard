@@ -161,6 +161,8 @@ from browser_monitor import (is_browser_running, kill_browsers, is_roblox_runnin
                              kill_roblox, force_kill_roblox, get_roblox_procs,
                              roblox_proc_names, _ROBLOX_NAMES)
 import roblox_lock
+import app_tracker
+from app_tracker import UsageTracker, force_close_by_name, PROTECTED as APP_PROTECTED
 from timer_manager import TimerManager, TimerState
 from password_dialog import PasswordDialog
 from settings_dialog import SettingsDialog
@@ -565,6 +567,83 @@ def _enforcement_loop():
         time.sleep(interval)
 
 
+# ── Per-app tracking + limits ─────────────────────────────────────────────────
+# Games other than Roblox (Minecraft Education etc.) are handled generically:
+# the dashboard lists whatever he actually runs and sets a limit per app, so a
+# new game never needs a code change. Roblox keeps its own dedicated timer and
+# is excluded in app_tracker, so the two systems cannot fight each other.
+def _app_engage_block(exe_name: str):
+    """Stop an app relaunching via IFEO. Needs elevation; no-op if we lack it."""
+    if exe_name in APP_PROTECTED:
+        log.warning('[app_limit] refusing to block protected process %s', exe_name)
+        return
+    roblox_lock.engage_lock({exe_name})
+
+
+def _app_release_block(exe_name: str):
+    if exe_name in APP_PROTECTED:
+        return
+    roblox_lock.release_lock({exe_name})
+
+
+app_usage_tracker = UsageTracker(
+    _BASE, lambda: config, _DEVICE,
+    run_warning   = _run_warning,          # reuses the Roblox save-warning popup
+    force_close   = force_close_by_name,
+    engage_block  = _app_engage_block,
+    release_block = _app_release_block,
+)
+
+
+def _app_sample_loop():
+    """Credit time to every visible app and apply its rule."""
+    log.info('[app_limit] usage sampling started (every %ds)', app_tracker.POLL_SECS)
+    # First run on a PC: record what is already open without emailing about it,
+    # so the parent is not flooded with alerts on day one.
+    try:
+        first_run = not app_usage_tracker.snapshot()
+        if first_run:
+            seen = list(app_tracker.visible_apps().keys())
+            if seen:
+                app_usage_tracker.seed_known(seen)
+                log.info('[app_limit] first run — seeded %d existing app(s) silently', len(seen))
+    except Exception as e:
+        log.warning('[app_limit] seeding failed: %s', e)
+
+    while True:
+        try:
+            app_usage_tracker.sample_once()
+            app_usage_tracker.save_state()
+        except Exception as e:
+            log.error('[app_limit] sample error: %s', e)
+        time.sleep(app_tracker.POLL_SECS)
+
+
+def _app_sweep_loop():
+    """Safety net: catch a restricted app that is running without a visible
+    window this cycle (same idea as the Roblox enforcement poll)."""
+    interval = max(15, int(config.get('enforcement_interval_secs', 30)))
+    while True:
+        time.sleep(interval)
+        try:
+            app_usage_tracker.enforce_sweep()
+        except Exception as e:
+            log.error('[app_limit] sweep error: %s', e)
+
+
+def _remote_extend_app(exe_name: str, secs: int):
+    app_usage_tracker.grant_extra(exe_name, secs)
+
+
+def _remote_block_app(exe_name: str):
+    if exe_name in APP_PROTECTED:
+        log.warning('[app_limit] refusing remote block of protected %s', exe_name)
+        return
+    log.info('[app_limit] remote close requested for %s', exe_name)
+    _app_engage_block(exe_name)
+    force_close_by_name(exe_name)
+
+
 # ── UI Automation URL watcher ─────────────────────────────────────────────────
 def _block_adult_url(url: str, domain: str, reason: str):
     """Kill the browser and log the blocked attempt."""
@@ -671,6 +750,11 @@ supabase_sync.set_action_callbacks(
     block_roblox=_remote_block_roblox,
     show_message=_remote_show_message,
 )
+supabase_sync.set_app_callbacks(
+    extend_app=_remote_extend_app,
+    block_app=_remote_block_app,
+)
+supabase_sync.set_app_tracker(app_usage_tracker)
 
 
 # ── Background history sync ───────────────────────────────────────────────────
@@ -801,6 +885,11 @@ def _midnight_reset_loop():
         timer_mgr.reset_to_idle()
         roblox_timer_mgr.reset_to_idle()
         roblox_lock.release_lock()  # new day → Roblox is allowed to launch again
+        try:
+            # New day: zero per-app usage and lift every app block we applied.
+            app_usage_tracker.reset_for_new_day()
+        except Exception as e:
+            log.warning('[midnight_reset] app tracker reset failed: %s', e)
         today_str = datetime.now().date().isoformat()
         try:
             with open(_RESET_FILE, 'w') as f:
@@ -850,6 +939,13 @@ def _do_kill_switch(remove_from_startup: bool):
     url_watcher.stop()
     supabase_sync.stop()
     roblox_lock.release_lock()  # don't leave Roblox blocked after we exit
+    try:
+        # Never leave an app blocked by a guardian that is no longer running —
+        # otherwise that game stays unlaunchable with nothing to unblock it.
+        for _exe in app_usage_tracker.rules():
+            _app_release_block(_exe)
+    except Exception as e:
+        log.warning('[kill_switch] releasing app blocks failed: %s', e)
 
     # 2. Remove from Windows startup registry if requested
     if remove_from_startup:
@@ -942,6 +1038,25 @@ def action_status(icon, item):
         root = tk.Tk()
         root.withdraw()
         startup = 'Yes' if is_registered_at_startup() else 'No'
+        # Top apps used today, so the parent can sanity-check tracking on the
+        # machine itself without opening the dashboard.
+        try:
+            apps = app_usage_tracker.snapshot()[:6]
+            if apps:
+                lines = []
+                for a in apps:
+                    exe = a['exe_name']
+                    lim = app_usage_tracker.limit_secs(exe)
+                    used_m = a['seconds_used'] // 60
+                    if lim:
+                        lines.append(f"{a['display_name']}: {used_m}m / {lim // 60}m")
+                    else:
+                        lines.append(f"{a['display_name']}: {used_m}m")
+                apps_txt = '\n'.join(lines)
+            else:
+                apps_txt = '(nothing tracked yet)'
+        except Exception as e:
+            apps_txt = f'(error: {e})'
         messagebox.showinfo(
             'Browser Guardian',
             f'--- Browser ---\n'
@@ -950,6 +1065,8 @@ def action_status(icon, item):
             f'--- Roblox ---\n'
             f'State:     {roblox_timer_mgr.state}\n'
             f'Remaining: {roblox_timer_mgr.get_remaining_str()}\n\n'
+            f'--- Apps today ---\n'
+            f'{apps_txt}\n\n'
             f'Run at startup: {startup}'
         )
         root.destroy()
@@ -1134,6 +1251,8 @@ def on_tray_ready(icon):
     threading.Thread(target=_gemini_classify_loop,  daemon=True).start()
     threading.Thread(target=_midnight_reset_loop,   daemon=True).start()
     threading.Thread(target=_timer_persist_loop,    daemon=True).start()
+    threading.Thread(target=_app_sample_loop,       daemon=True).start()
+    threading.Thread(target=_app_sweep_loop,        daemon=True).start()
     url_watcher.start()
     supabase_sync.start()
 

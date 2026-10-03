@@ -96,6 +96,44 @@
     .blocked-domain { font-weight: 700; color: #c62828; }
     .no-blocked { padding: 14px; text-align: center; color: #aaa; font-size: .88rem; }
 
+    /* Apps used today */
+    .apps-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    .apps-table th { background: #00695c; color: #fff; padding: 8px 12px; text-align: left;
+                     font-weight: 500; white-space: nowrap; }
+    .apps-table td { padding: 8px 12px; border-bottom: 1px solid #e0f2f1; vertical-align: middle; }
+    .apps-table tr:last-child td { border-bottom: none; }
+    .apps-table tr:hover td { background: #f1f8f7; }
+    .app-name { font-weight: 700; color: #00695c; }
+    .app-exe  { display: block; color: #aaa; font-size: .72rem; font-weight: 400; }
+    .app-dev  { color: #888; font-size: .78rem; white-space: nowrap; }
+    .app-used { font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+    .app-bar-wrap { background: #e0e0e0; border-radius: 10px; height: 7px; width: 110px;
+                    overflow: hidden; margin-top: 4px; }
+    .app-bar { height: 100%; background: #26a69a; border-radius: 10px; }
+    .app-bar.warn { background: #ffa726; }
+    .app-bar.over { background: #ef5350; }
+    .rule-cell { white-space: nowrap; }
+    .rule-sel { padding: 4px 6px; border: 1px solid #b2dfdb; border-radius: 5px;
+                font-size: .78rem; font-family: inherit; background: #fff; }
+    .rule-mins { width: 58px; padding: 4px 6px; border: 1px solid #b2dfdb;
+                 border-radius: 5px; font-size: .78rem; margin-left: 4px; }
+    .btn-rule { padding: 4px 10px; font-size: .75rem; background: #00695c; color: #fff;
+                border: none; border-radius: 5px; cursor: pointer; font-weight: 600; margin-left: 4px; }
+    .btn-rule:hover { background: #00897b; }
+    .btn-rule:disabled { opacity: .45; cursor: default; }
+    .btn-appext { padding: 3px 8px; font-size: .72rem; background: #e0f2f1; color: #00695c;
+                  border: 1px solid #80cbc4; border-radius: 5px; cursor: pointer;
+                  font-weight: 600; margin-right: 3px; }
+    .btn-appext:hover { background: #b2dfdb; }
+    .btn-appext:disabled { opacity: .45; cursor: default; }
+    .tag-game { display: inline-block; background: #ede7f6; color: #4527a0; padding: 1px 7px;
+                border-radius: 10px; font-size: .68rem; font-weight: 700; margin-left: 5px; }
+    .tag-store { display: inline-block; background: #e3f2fd; color: #1565c0; padding: 1px 7px;
+                 border-radius: 10px; font-size: .68rem; font-weight: 700; margin-left: 5px; }
+    .st-block { color: #c62828; font-weight: 700; font-size: .78rem; }
+    .st-limit { color: #e65100; font-weight: 700; font-size: .78rem; }
+    .st-allow { color: #2e7d32; font-weight: 600; font-size: .78rem; }
+
     /* Device control */
     .device-grid { display: flex; flex-wrap: wrap; gap: 16px; }
     .device-card { flex: 1; min-width: 260px; background: #f7f8fd; border: 1px solid #c5cae9;
@@ -181,6 +219,15 @@
       <div id="deviceGrid" class="device-grid">
         <div class="no-devices">Loading devices&#8230;</div>
       </div>
+    </div>
+
+    <!-- Apps used today + per-app limits -->
+    <div class="card">
+      <div class="blocked-header">
+        <span class="card-title" style="margin-bottom:0">&#x1F3AE; Apps Used Today</span>
+        <span id="appsRefreshLabel" style="font-size:.75rem;color:#aaa;"></span>
+      </div>
+      <div id="appsTable"><div class="no-blocked">Loading&#8230;</div></div>
     </div>
 
     <!-- Blocked attempts -->
@@ -532,13 +579,217 @@ function renderBlockedAttempts(rows) {
     </table>`;
 }
 
+// ── Apps Used Today + per-app limits ─────────────────────────────────────
+// Never allow a rule on a core Windows process. The desktop app and a Supabase
+// trigger enforce the same list; this is just the first line of defence.
+const PROTECTED_APPS = new Set([
+  'explorer.exe','winlogon.exe','csrss.exe','services.exe','lsass.exe','smss.exe',
+  'wininit.exe','svchost.exe','dwm.exe','taskhostw.exe','ctfmon.exe','sihost.exe',
+  'fontdrvhost.exe','runtimebroker.exe','searchhost.exe','startmenuexperiencehost.exe',
+  'shellexperiencehost.exe','applicationframehost.exe','systemsettings.exe',
+  'userinit.exe','browserguardian.exe','wscript.exe','cscript.exe','system',
+]);
+
+let APP_RULES = {};   // "device|exe" -> rule row
+
+function fmtMins(secs) {
+  const m = Math.round((secs || 0) / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+async function loadApps() {
+  const today = new Date().toISOString().split('T')[0];
+  try {
+    const [usage, rules] = await Promise.all([
+      sbFetch('app_usage', `usage_date=eq.${today}&order=seconds_used.desc&limit=100`),
+      sbFetch('app_rules', 'limit=200'),
+    ]);
+    APP_RULES = {};
+    rules.forEach(r => { APP_RULES[`${r.device_id}|${r.exe_name}`] = r; });
+    renderApps(usage);
+    document.getElementById('appsRefreshLabel').textContent =
+      'Updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('appsTable').innerHTML =
+      `<div class="no-blocked" style="color:#c62828">Error: ${e.message}</div>`;
+  }
+}
+
+function renderApps(rows) {
+  if (!rows.length) {
+    document.getElementById('appsTable').innerHTML =
+      '<div class="no-blocked">No app usage recorded today yet.</div>';
+    return;
+  }
+  const trs = rows.map(r => {
+    const exe    = r.exe_name;
+    const dev    = r.device_id;
+    const key    = `${dev}|${exe}`;
+    const rule   = APP_RULES[key] || {};
+    const action = rule.action || 'allow';
+    const limMin = rule.daily_limit_mins || '';
+    const used   = r.seconds_used || 0;
+    const prot   = PROTECTED_APPS.has((exe || '').toLowerCase());
+    const safeId = key.replace(/[^a-z0-9]/gi, '_');
+
+    // Progress bar only meaningful when a limit exists
+    let bar = '', status;
+    if (action === 'block') {
+      status = '<span class="st-block">&#x26D4; Blocked</span>';
+    } else if (action === 'limit' && limMin) {
+      const pct = Math.min(100, Math.round(used / (limMin * 60) * 100));
+      const cls = pct >= 100 ? 'over' : (pct >= 80 ? 'warn' : '');
+      status = `<span class="st-limit">${limMin}m/day</span>`;
+      bar = `<div class="app-bar-wrap"><div class="app-bar ${cls}" style="width:${pct}%"></div></div>`;
+    } else {
+      status = '<span class="st-allow">Unlimited</span>';
+    }
+
+    const gameTag  = rule.is_game ? '<span class="tag-game">GAME</span>' : '';
+    const storeTag = r.is_store_app ? '<span class="tag-store">STORE</span>' : '';
+
+    const ruleCell = prot
+      ? '<span style="color:#aaa;font-size:.76rem">system &mdash; protected</span>'
+      : `<select class="rule-sel" id="act_${safeId}">
+           <option value="allow"${action==='allow'?' selected':''}>Allow</option>
+           <option value="limit"${action==='limit'?' selected':''}>Daily limit</option>
+           <option value="block"${action==='block'?' selected':''}>Block</option>
+         </select>
+         <input class="rule-mins" id="min_${safeId}" type="number" min="1" max="1440"
+                placeholder="min" value="${limMin}">
+         <button class="btn-rule" onclick="saveRule('${dev}','${exe}','${safeId}',this)">Save</button>`;
+
+    const extraCell = prot ? '' :
+      [15, 30].map(m =>
+        `<button class="btn-appext" onclick="grantApp('${dev}','${exe}',${m},this)">+${m}m</button>`
+      ).join('') +
+      `<button class="btn-appext" style="background:#ffebee;color:#c62828;border-color:#ef9a9a"
+         onclick="blockAppNow('${dev}','${exe}',this)">Close now</button>`;
+
+    return `<tr>
+      <td><span class="app-name">${r.display_name || exe}${gameTag}${storeTag}</span>
+          <span class="app-exe">${exe}</span></td>
+      <td class="app-dev">${dev}</td>
+      <td class="app-used">${fmtMins(used)}${bar}</td>
+      <td>${status}</td>
+      <td class="rule-cell">${ruleCell}</td>
+      <td class="rule-cell">${extraCell}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('appsTable').innerHTML = `
+    <table class="apps-table">
+      <thead><tr>
+        <th>App</th><th>Device</th><th>Used today</th>
+        <th>Status</th><th>Rule</th><th>Quick actions</th>
+      </tr></thead>
+      <tbody>${trs}</tbody>
+    </table>`;
+}
+
+async function sbUpsert(table, payload) {
+  const resp = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: 'POST',
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'resolution=merge-duplicates,return=minimal',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+}
+
+async function saveRule(deviceId, exeName, safeId, btn) {
+  if (PROTECTED_APPS.has((exeName || '').toLowerCase())) {
+    alert('That is a core Windows process and cannot be restricted.');
+    return;
+  }
+  const action = document.getElementById('act_' + safeId).value;
+  const minsEl = document.getElementById('min_' + safeId);
+  const mins   = parseInt(minsEl.value, 10);
+
+  if (action === 'limit' && (!mins || mins < 1)) {
+    alert('Enter how many minutes per day are allowed.');
+    minsEl.focus();
+    return;
+  }
+  if (action === 'block' &&
+      !confirm(`Block "${exeName}" on ${deviceId}?\n\nIt will be closed immediately whenever it opens.`)) {
+    return;
+  }
+
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '…';
+  try {
+    await sbUpsert('app_rules', {
+      device_id: deviceId,
+      exe_name: exeName,
+      action,
+      daily_limit_mins: action === 'limit' ? mins : null,
+      is_game: (APP_RULES[`${deviceId}|${exeName}`] || {}).is_game || false,
+      updated_at: new Date().toISOString(),
+    });
+    btn.textContent = '✓';
+    setTimeout(() => { btn.disabled = false; btn.textContent = old; loadApps(); }, 1500);
+  } catch (e) {
+    btn.textContent = '!';
+    btn.disabled = false;
+    alert('Error: ' + e.message);
+  }
+}
+
+async function grantApp(deviceId, exeName, minutes, btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '…';
+  try {
+    await sbPost('remote_commands', {
+      device_id: deviceId,
+      command: 'extend_app',
+      params: { exe_name: exeName, minutes },
+      status: 'pending',
+    });
+    btn.textContent = '✓';
+    setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 3000);
+  } catch (e) {
+    btn.textContent = '!';
+    btn.disabled = false;
+  }
+}
+
+async function blockAppNow(deviceId, exeName, btn) {
+  if (!confirm(`Close "${exeName}" on ${deviceId} right now?`)) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    await sbPost('remote_commands', {
+      device_id: deviceId,
+      command: 'block_app',
+      params: { exe_name: exeName },
+      status: 'pending',
+    });
+    btn.textContent = '✓';
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Close now'; }, 4000);
+  } catch (e) {
+    btn.textContent = '!';
+    btn.disabled = false;
+    alert('Error: ' + e.message);
+  }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   init();
   loadDevices();
   loadBlockedAttempts();
+  loadApps();
   setInterval(loadDevices, 10000);
   setInterval(loadBlockedAttempts, 30000);
+  setInterval(loadApps, 20000);
 });
 </script>
 </body>

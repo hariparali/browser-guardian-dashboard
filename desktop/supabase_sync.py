@@ -30,6 +30,10 @@ class SupabaseSync:
         self._block_browser_cb  = None
         self._block_roblox_cb   = None
         self._show_message_cb   = None
+        self._extend_app_cb     = None
+        self._block_app_cb      = None
+        self._tracker           = None   # UsageTracker, set via set_app_tracker
+        self._app_tick          = 0      # counts 5s loops, for the ~60s app cycle
         self._stop              = threading.Event()
         self._offline_count     = 0   # consecutive network failures
 
@@ -43,6 +47,19 @@ class SupabaseSync:
         self._block_browser_cb = block_browser
         self._block_roblox_cb  = block_roblox
         self._show_message_cb  = show_message
+
+    def set_app_callbacks(self, extend_app=None, block_app=None):
+        """Per-app remote commands from the dashboard.
+        extend_app(exe_name, secs) → grant more time today
+        block_app(exe_name)        → close it right now
+        """
+        self._extend_app_cb = extend_app
+        self._block_app_cb  = block_app
+
+    def set_app_tracker(self, tracker):
+        """Attach the UsageTracker so the sync loop can upload its totals and
+        feed it the per-app rules from the dashboard."""
+        self._tracker = tracker
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -135,6 +152,17 @@ class SupabaseSync:
                 message = str(params.get('message', ''))[:500]
                 self._show_message_cb(message)
                 log.info('[supabase_sync] show_message: %s', message[:60])
+            elif command == 'extend_app' and self._extend_app_cb:
+                exe     = str(params.get('exe_name', '')).lower()[:120]
+                minutes = int(params.get('minutes', 15))
+                if exe:
+                    self._extend_app_cb(exe, minutes * 60)
+                    log.info('[supabase_sync] extend_app %s +%dm', exe, minutes)
+            elif command == 'block_app' and self._block_app_cb:
+                exe = str(params.get('exe_name', '')).lower()[:120]
+                if exe:
+                    self._block_app_cb(exe)
+                    log.info('[supabase_sync] block_app %s', exe)
         except Exception as e:
             log.error('[supabase_sync] execute error: %s', e)
         finally:
@@ -173,6 +201,89 @@ class SupabaseSync:
                 log.warning('[supabase_sync] push_blocked HTTP %s', resp.status_code)
         except Exception as e:
             log.warning('[supabase_sync] push_blocked error: %s', e)
+
+    # ── Per-app usage upload + rule download ─────────────────────────────────
+
+    def _push_app_usage(self):
+        """Upsert today's running totals. Re-sending the full total each cycle
+        means a dropped upload self-heals next time instead of losing minutes."""
+        rows = self._tracker.snapshot()
+        if not rows:
+            return
+        today = datetime.now().date().isoformat()
+        now   = datetime.now(timezone.utc).isoformat()
+        payload = [{
+            'device_id':    DEVICE_ID,
+            'exe_name':     r['exe_name'],
+            'display_name': r['display_name'][:120],
+            'usage_date':   today,
+            'seconds_used': r['seconds_used'],
+            'last_seen':    now,
+        } for r in rows]
+        hdrs = self._headers()
+        hdrs['Prefer'] = 'resolution=merge-duplicates,return=minimal'
+        resp = requests.post(self._url('app_usage'), json=payload,
+                             headers=hdrs, timeout=8)
+        if resp.status_code not in (200, 201):
+            log.warning('[supabase_sync] push_app_usage HTTP %s: %s',
+                        resp.status_code, resp.text[:200])
+
+    def _push_known_apps(self):
+        """Register apps we have not reported yet — this is what triggers the
+        'new app' email. Only sent once per app per device."""
+        pending = self._tracker.new_apps_to_report()
+        if not pending:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        payload = [{
+            'device_id':    DEVICE_ID,
+            'exe_name':     a['exe_name'],
+            'display_name': (a['display_name'] or '')[:120],
+            'exe_path':     a['exe_path'],
+            'is_store_app': a['is_store_app'],
+            'last_seen':    now,
+        } for a in pending]
+        hdrs = self._headers()
+        hdrs['Prefer'] = 'resolution=merge-duplicates,return=minimal'
+        resp = requests.post(self._url('known_apps'), json=payload,
+                             headers=hdrs, timeout=8)
+        if resp.status_code in (200, 201):
+            self._tracker.mark_reported([a['exe_name'] for a in pending])
+            log.info('[supabase_sync] registered %d new app(s): %s',
+                     len(pending), [a['exe_name'] for a in pending])
+        else:
+            log.warning('[supabase_sync] push_known_apps HTTP %s', resp.status_code)
+
+    def _pull_app_rules(self):
+        """Fetch this device's per-app rules and hand them to the tracker."""
+        resp = requests.get(
+            self._url('app_rules'),
+            params={'device_id': f'eq.{DEVICE_ID}', 'limit': '200'},
+            headers=self._headers(), timeout=8,
+        )
+        if resp.status_code != 200:
+            return
+        self._tracker.apply_rules(resp.json())
+
+    def _app_cycle(self):
+        """Runs about once a minute (every 12th 5s loop)."""
+        if self._tracker is None or not self._is_configured():
+            return
+        try:
+            self._pull_app_rules()
+        except Exception as e:
+            if self._offline_count == 0:
+                log.warning('[supabase_sync] pull_app_rules: %s', e)
+        try:
+            self._push_app_usage()
+        except Exception as e:
+            if self._offline_count == 0:
+                log.warning('[supabase_sync] push_app_usage: %s', e)
+        try:
+            self._push_known_apps()
+        except Exception as e:
+            if self._offline_count == 0:
+                log.warning('[supabase_sync] push_known_apps: %s', e)
 
     # ── Log cleanup ───────────────────────────────────────────────────────────
 
@@ -215,3 +326,9 @@ class SupabaseSync:
                     log.warning('[supabase_sync] poll: %s', e)
             if not failed:
                 self._offline_count = 0
+            # Per-app usage/rules are far less time-critical than the 5s timer
+            # push, so run them about once a minute to keep traffic light.
+            self._app_tick += 1
+            if self._app_tick >= 12:
+                self._app_tick = 0
+                self._app_cycle()
