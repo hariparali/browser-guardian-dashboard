@@ -288,7 +288,9 @@ async function sbFetch(path, queryString) {
 
 // ── Data loading ──────────────────────────────────────────────────────────
 let currentPage = 1;
-document.getElementById('dateInput').value = new Date().toISOString().split('T')[0];
+// Local date, not UTC — otherwise after local midnight the picker defaults to
+// yesterday (localDate is hoisted, defined in the Apps section below).
+document.getElementById('dateInput').value = localDate();
 
 async function loadAll(page = 1) {
   currentPage = page;
@@ -539,10 +541,9 @@ async function loadDevices() {
 
 // ── Blocked Attempts ─────────────────────────────────────────────────────
 async function loadBlockedAttempts() {
-  const today = new Date().toISOString().split('T')[0];
   try {
     const data = await sbFetch('blocked_attempts',
-      `timestamp=gte.${today}T00:00:00&order=timestamp.desc&limit=50`);
+      `timestamp=gte.${localMidnightISO()}&order=timestamp.desc&limit=50`);
     renderBlockedAttempts(data);
   } catch(e) {
     document.getElementById('blockedTable').innerHTML =
@@ -592,6 +593,22 @@ const PROTECTED_APPS = new Set([
 
 let APP_RULES = {};   // "device|exe" -> rule row
 
+// Local calendar date as YYYY-MM-DD. Must NOT use toISOString(), which returns
+// the UTC date: the desktop app stamps usage_date with the PC's LOCAL date, so
+// between local midnight and UTC midnight the two disagree and the query
+// silently matches nothing.
+function localDate(d = new Date()) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// The UTC instant of local midnight today. Used for timestamptz columns, where
+// comparing against a bare local date string would cut off the hours between
+// local midnight and UTC midnight.
+function localMidnightISO(d = new Date()) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).toISOString();
+}
+
 function fmtMins(secs) {
   const m = Math.round((secs || 0) / 60);
   if (m < 60) return `${m}m`;
@@ -599,7 +616,7 @@ function fmtMins(secs) {
 }
 
 async function loadApps() {
-  const today = new Date().toISOString().split('T')[0];
+  const today = localDate();
   try {
     const [usage, rules] = await Promise.all([
       sbFetch('app_usage', `usage_date=eq.${today}&order=seconds_used.desc&limit=100`),
