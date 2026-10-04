@@ -30,7 +30,7 @@ import subprocess
 import threading
 import time
 from ctypes import wintypes
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psutil
 
@@ -222,6 +222,11 @@ class UsageTracker:
         # paths only walked _rules, so such a block could never be released —
         # that is how cmd.exe ended up permanently blocked on 2026-10-04.
         self._blocked = set()
+        # exe_name -> ISO timestamp when it was last actually ON SCREEN. Kept
+        # separate from the upload time: previously every row was stamped with
+        # "now" on each upload, so an app closed hours ago still looked live on
+        # the dashboard (all rows shared one identical last_seen).
+        self._seen_at = {}
 
         self._load_state()
         self._load_rules()
@@ -253,6 +258,7 @@ class UsageTracker:
                 self.save_state()
             return
         self._blocked = set(data.get('blocked') or [])
+        self._seen_at = data.get('seen_at') or {}
         self._counts = {k: int(v) for k, v in (data.get('counts') or {}).items()}
         self._meta   = data.get('meta') or {}
         self._bonus  = {k: int(v) for k, v in (data.get('bonus') or {}).items()}
@@ -272,6 +278,7 @@ class UsageTracker:
                     'warned': sorted(self._warned),
                     'known':  sorted(self._known),
                     'blocked': sorted(self._blocked),
+                    'seen_at': self._seen_at,
                 }, f)
             os.replace(tmp, self._state_file)   # atomic; no truncated file on crash
         except Exception as e:
@@ -373,6 +380,9 @@ class UsageTracker:
                 'seconds_used': int(secs),
                 'is_store':     bool(meta.get('is_store')),
                 'path':         meta.get('path', ''),
+                # When it was really last on screen (not when we last uploaded).
+                'last_seen':    self._seen_at.get(exe),
+                'is_blocked':   exe in self._blocked,
             })
         out.sort(key=lambda r: -r['seconds_used'])
         return out
@@ -431,8 +441,10 @@ class UsageTracker:
         if today != self._date:
             self.reset_for_new_day()
 
+        now_iso = datetime.now(timezone.utc).isoformat()
         for exe, info in visible_apps().items():
             self._counts[exe] = int(self._counts.get(exe, 0)) + POLL_SECS
+            self._seen_at[exe] = now_iso        # genuinely on screen right now
             meta = self._meta.setdefault(exe, {})
             meta['path']     = info.get('path') or meta.get('path', '')
             meta['is_store'] = bool(info.get('is_store'))

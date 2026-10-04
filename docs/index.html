@@ -130,6 +130,8 @@
                 border-radius: 10px; font-size: .68rem; font-weight: 700; margin-left: 5px; }
     .tag-store { display: inline-block; background: #e3f2fd; color: #1565c0; padding: 1px 7px;
                  border-radius: 10px; font-size: .68rem; font-weight: 700; margin-left: 5px; }
+    .tag-live { display: inline-block; background: #e8f5e9; color: #2e7d32; padding: 1px 7px;
+                border-radius: 10px; font-size: .68rem; font-weight: 700; margin-left: 5px; }
     .st-block { color: #c62828; font-weight: 700; font-size: .78rem; }
     .st-limit { color: #e65100; font-weight: 700; font-size: .78rem; }
     .st-allow { color: #2e7d32; font-weight: 600; font-size: .78rem; }
@@ -674,6 +676,10 @@ function renderApps(rows) {
 
     const gameTag  = rule.is_game ? '<span class="tag-game">GAME</span>' : '';
     const storeTag = r.is_store_app ? '<span class="tag-store">STORE</span>' : '';
+    // On screen within the last 90s (the sampler runs every 15s and uploads
+    // roughly every 60s, so 90s avoids flapping between uploads).
+    const liveTag = (r.last_seen && (Date.now() - new Date(r.last_seen).getTime()) < 90000)
+      ? '<span class="tag-live">&#x25CF; NOW</span>' : '';
 
     const ruleCell = prot
       ? '<span style="color:#aaa;font-size:.76rem">system &mdash; protected</span>'
@@ -701,7 +707,7 @@ function renderApps(rows) {
          onclick="appAction('${dev}','${exe}','block_app',this,'Block')">Block</button>`;
 
     return `<tr>
-      <td><span class="app-name">${r.display_name || exe}${gameTag}${storeTag}</span>
+      <td><span class="app-name">${r.display_name || exe}${liveTag}${gameTag}${storeTag}</span>
           <span class="app-exe">${exe}</span></td>
       <td class="app-dev">${dev}</td>
       <td class="app-used">${fmtMins(used)}${bar}</td>

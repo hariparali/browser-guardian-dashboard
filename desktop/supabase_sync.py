@@ -235,13 +235,15 @@ class SupabaseSync:
             return
         today = datetime.now().date().isoformat()
         now   = datetime.now(timezone.utc).isoformat()
+        # last_seen must be when the app was really on screen, NOT upload time —
+        # stamping every row with "now" made closed apps look permanently live.
         payload = [{
             'device_id':    DEVICE_ID,
             'exe_name':     r['exe_name'],
             'display_name': r['display_name'][:120],
             'usage_date':   today,
             'seconds_used': r['seconds_used'],
-            'last_seen':    now,
+            'last_seen':    r.get('last_seen') or now,
         } for r in rows]
         hdrs = self._headers()
         hdrs['Prefer'] = 'resolution=merge-duplicates,return=minimal'
