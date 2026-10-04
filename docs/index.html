@@ -225,7 +225,12 @@
     <div class="card">
       <div class="blocked-header">
         <span class="card-title" style="margin-bottom:0">&#x1F3AE; Apps Used Today</span>
-        <span id="appsRefreshLabel" style="font-size:.75rem;color:#aaa;"></span>
+        <span>
+          <button class="btn-appext" style="background:#fff3e0;color:#e65100;border-color:#ffb74d"
+                  title="Lift every app launch-block on all listed devices"
+                  onclick="unblockAll(this)">&#x1F513; Unblock all</button>
+          <span id="appsRefreshLabel" style="font-size:.75rem;color:#aaa;margin-left:8px;"></span>
+        </span>
       </div>
       <div id="appsTable"><div class="no-blocked">Loading&#8230;</div></div>
     </div>
@@ -589,6 +594,10 @@ const PROTECTED_APPS = new Set([
   'fontdrvhost.exe','runtimebroker.exe','searchhost.exe','startmenuexperiencehost.exe',
   'shellexperiencehost.exe','applicationframehost.exe','systemsettings.exe',
   'userinit.exe','browserguardian.exe','wscript.exe','cscript.exe','system',
+  // Recovery tools — blocking any of these would remove the ability to fix the
+  // PC remotely (cmd.exe is where the schtasks recovery commands get typed).
+  'cmd.exe','powershell.exe','pwsh.exe','taskmgr.exe','regedit.exe','mmc.exe',
+  'control.exe','msconfig.exe',
 ]);
 
 let APP_RULES = {};   // "device|exe" -> rule row
@@ -677,12 +686,19 @@ function renderApps(rows) {
                 placeholder="min" value="${limMin}">
          <button class="btn-rule" onclick="saveRule('${dev}','${exe}','${safeId}',this)">Save</button>`;
 
+    // "Close" and "Block" are deliberately separate. Close just ends the
+    // process; Block also writes a launch-block that persists until midnight or
+    // an explicit unblock. Merging them (the old "Close now") made it far too
+    // easy to create a block without realising it.
     const extraCell = prot ? '' :
       [15, 30].map(m =>
         `<button class="btn-appext" onclick="grantApp('${dev}','${exe}',${m},this)">+${m}m</button>`
       ).join('') +
+      `<button class="btn-appext" title="End the app now. It can be reopened."
+         onclick="appAction('${dev}','${exe}','close_app',this,'Close')">Close</button>` +
       `<button class="btn-appext" style="background:#ffebee;color:#c62828;border-color:#ef9a9a"
-         onclick="blockAppNow('${dev}','${exe}',this)">Close now</button>`;
+         title="Close it AND stop it reopening until midnight"
+         onclick="appAction('${dev}','${exe}','block_app',this,'Block')">Block</button>`;
 
     return `<tr>
       <td><span class="app-name">${r.display_name || exe}${gameTag}${storeTag}</span>
@@ -778,21 +794,52 @@ async function grantApp(deviceId, exeName, minutes, btn) {
   }
 }
 
-async function blockAppNow(deviceId, exeName, btn) {
-  if (!confirm(`Close "${exeName}" on ${deviceId} right now?`)) return;
+async function appAction(deviceId, exeName, command, btn, label) {
+  const prompts = {
+    close_app: `Close "${exeName}" on ${deviceId} now?\n\nIt CAN be reopened.`,
+    block_app: `Block "${exeName}" on ${deviceId}?\n\nIt will be closed AND cannot be reopened until midnight (or you press Unblock all).`,
+  };
+  if (prompts[command] && !confirm(prompts[command])) return;
   btn.disabled = true;
   btn.textContent = '…';
   try {
     await sbPost('remote_commands', {
       device_id: deviceId,
-      command: 'block_app',
+      command,
       params: { exe_name: exeName },
       status: 'pending',
     });
     btn.textContent = '✓';
-    setTimeout(() => { btn.disabled = false; btn.textContent = 'Close now'; }, 4000);
+    setTimeout(() => { btn.disabled = false; btn.textContent = label; }, 4000);
   } catch (e) {
     btn.textContent = '!';
+    btn.disabled = false;
+    alert('Error: ' + e.message);
+  }
+}
+
+// Panic button. A launch-block lives in the Windows registry and is normally
+// cleared by the guardian at midnight — so if the guardian ever stops starting,
+// this is how you clear everything without touching the PC.
+async function unblockAll(btn) {
+  const devices = [...new Set(
+    Array.from(document.querySelectorAll('#appsTable tr td:nth-child(2)'))
+         .map(td => td.textContent.trim()).filter(Boolean))];
+  if (!devices.length) { alert('No devices listed yet.'); return; }
+  if (!confirm(`Lift ALL app blocks on: ${devices.join(', ')}?\n\nEvery blocked app becomes launchable again.`)) return;
+  btn.disabled = true;
+  const old = btn.innerHTML;
+  btn.textContent = '…';
+  try {
+    for (const dev of devices) {
+      await sbPost('remote_commands', {
+        device_id: dev, command: 'unblock_all_apps', params: {}, status: 'pending',
+      });
+    }
+    btn.textContent = '✓ Sent';
+    setTimeout(() => { btn.disabled = false; btn.innerHTML = old; }, 4000);
+  } catch (e) {
+    btn.innerHTML = old;
     btn.disabled = false;
     alert('Error: ' + e.message);
   }

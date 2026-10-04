@@ -51,6 +51,13 @@ PROTECTED = {
     'browserguardian.exe', 'wscript.exe', 'cscript.exe', 'system',
     'registry', 'memory compression', 'textinputhost.exe', 'lockapp.exe',
     'searchindexer.exe', 'audiodg.exe', 'conhost.exe', 'backgroundtaskhost.exe',
+    # ── Recovery tools — NEVER blockable ──────────────────────────────────────
+    # Blocking any of these removes the ability to fix the PC remotely. We hit
+    # this for real on 2026-10-04: a "Close now" on cmd.exe wrote a launch-block
+    # that locked Command Prompt, which is exactly where the schtasks recovery
+    # commands get typed. Non-negotiable.
+    'cmd.exe', 'powershell.exe', 'pwsh.exe', 'taskmgr.exe', 'regedit.exe',
+    'mmc.exe', 'control.exe', 'msconfig.exe', 'cmd', 'powershell',
 }
 
 # Handled by their own dedicated timers already — don't double-count or
@@ -209,6 +216,12 @@ class UsageTracker:
         self._warned  = set()   # apps already given their warning today
         self._warning_active = set()   # apps mid-warning: do not kill yet
         self._known   = set()   # apps already reported to known_apps
+        # Every app we have an active launch-block on. Tracked on disk and
+        # INDEPENDENTLY of _rules, because a block can be applied to an app that
+        # has no rule (the dashboard "Block" action). Previously the cleanup
+        # paths only walked _rules, so such a block could never be released —
+        # that is how cmd.exe ended up permanently blocked on 2026-10-04.
+        self._blocked = set()
 
         self._load_state()
         self._load_rules()
@@ -221,7 +234,25 @@ class UsageTracker:
         except Exception:
             return
         if data.get('date') != self._date:
-            return      # stale day - start today at zero
+            # Stale day: today's counts start at zero, but any launch-block left
+            # over from that older day must still be cleared. The registry block
+            # survives reboots, so if we did not do this an app could stay
+            # blocked indefinitely whenever the PC was off at midnight (or the
+            # guardian failed to start for a few days).
+            stale = set(data.get('blocked') or [])
+            if stale:
+                log.info('[app_tracker] clearing %d stale launch-block(s) from %s: %s',
+                         len(stale), data.get('date'), sorted(stale))
+                for exe in stale:
+                    if self._release:
+                        try:
+                            self._release(exe)
+                        except Exception as e:
+                            log.warning('[app_tracker] stale release %s failed: %s', exe, e)
+                self._blocked = set()
+                self.save_state()
+            return
+        self._blocked = set(data.get('blocked') or [])
         self._counts = {k: int(v) for k, v in (data.get('counts') or {}).items()}
         self._meta   = data.get('meta') or {}
         self._bonus  = {k: int(v) for k, v in (data.get('bonus') or {}).items()}
@@ -240,6 +271,7 @@ class UsageTracker:
                     'bonus':  self._bonus,
                     'warned': sorted(self._warned),
                     'known':  sorted(self._known),
+                    'blocked': sorted(self._blocked),
                 }, f)
             os.replace(tmp, self._state_file)   # atomic; no truncated file on crash
         except Exception as e:
@@ -264,14 +296,31 @@ class UsageTracker:
             log.debug('[app_tracker] save_rules failed: %s', e)
 
     # -- day rollover -------------------------------------------------------
-    def reset_for_new_day(self):
-        """Zero everything and lift every block this tracker applied."""
-        for exe in list(self._rules):
+    def release_all_blocks(self):
+        """Lift EVERY launch-block we applied. Walks the tracked block set (not
+        _rules), so a block on an app with no rule is still released."""
+        targets = sorted(self._blocked | set(self._rules))
+        released = []
+        for exe in targets:
             if self._release:
                 try:
                     self._release(exe)
-                except Exception:
-                    pass
+                    released.append(exe)
+                except Exception as e:
+                    log.warning('[app_tracker] release %s failed: %s', exe, e)
+        self._blocked = set()
+        self.save_state()
+        if released:
+            log.info('[app_tracker] released %d launch-block(s): %s',
+                     len(released), released)
+        return released
+
+    def blocked_apps(self):
+        return sorted(self._blocked)
+
+    def reset_for_new_day(self):
+        """Zero everything and lift every block this tracker applied."""
+        self.release_all_blocks()
         self._date   = datetime.now().date().isoformat()
         self._counts = {}
         self._bonus  = {}
@@ -308,6 +357,7 @@ class UsageTracker:
                 self._release(exe_name)
             except Exception:
                 pass
+        self._blocked.discard(exe_name)
         self.save_state()
         log.info('[app_tracker] granted +%ds to %s (allowance %ss, used %ss)',
                  secs, exe_name, self.limit_secs(exe_name), self.seconds_used(exe_name))
@@ -444,10 +494,13 @@ class UsageTracker:
         before the block lands, so the block goes on first.
         """
         if exe in PROTECTED:
+            log.warning('[app_tracker] refusing to block protected process %s', exe)
             return
         if self._engage:
             try:
                 self._engage(exe)
+                self._blocked.add(exe)   # remember, so it can always be released
+                self.save_state()
             except Exception as e:
                 log.warning('[app_tracker] engage_block %s failed: %s', exe, e)
         if self._force_close:
@@ -455,6 +508,46 @@ class UsageTracker:
                 self._force_close(exe)
             except Exception as e:
                 log.warning('[app_tracker] force_close %s failed: %s', exe, e)
+
+    def close_only(self, exe):
+        """Close an app WITHOUT blocking relaunch (dashboard 'Close' action).
+
+        Deliberately separate from blocking: a parent who just wants the game
+        shut right now should not silently create a persistent launch-block.
+        """
+        exe = (exe or '').lower()
+        if exe in PROTECTED:
+            log.warning('[app_tracker] refusing to close protected process %s', exe)
+            return 0
+        log.info('[app_tracker] close-only requested for %s', exe)
+        if self._force_close:
+            try:
+                return self._force_close(exe)
+            except Exception as e:
+                log.warning('[app_tracker] close_only %s failed: %s', exe, e)
+        return 0
+
+    def block_now(self, exe):
+        """Close AND block relaunch (dashboard 'Block' action)."""
+        exe = (exe or '').lower()
+        if exe in PROTECTED:
+            log.warning('[app_tracker] refusing to block protected process %s', exe)
+            return
+        log.info('[app_tracker] block requested for %s', exe)
+        self._close_and_lock(exe)
+
+    def unblock(self, exe):
+        """Release one app's launch-block."""
+        exe = (exe or '').lower()
+        if self._release:
+            try:
+                self._release(exe)
+            except Exception as e:
+                log.warning('[app_tracker] unblock %s failed: %s', exe, e)
+        self._blocked.discard(exe)
+        self._warned.discard(exe)
+        self.save_state()
+        log.info('[app_tracker] unblocked %s', exe)
 
     def enforce_sweep(self):
         """Safety net, independent of the sampling loop.

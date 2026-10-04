@@ -225,7 +225,11 @@ begin
     'ctfmon.exe','sihost.exe','fontdrvhost.exe','runtimebroker.exe',
     'searchhost.exe','startmenuexperiencehost.exe','shellexperiencehost.exe',
     'applicationframehost.exe','systemsettings.exe','userinit.exe',
-    'browserguardian.exe','wscript.exe','system','registry','memory compression'
+    'browserguardian.exe','wscript.exe','system','registry','memory compression',
+    -- Recovery tools: blocking any of these removes the ability to fix the PC
+    -- remotely, so refuse a rule on them at the database too.
+    'cmd.exe','powershell.exe','pwsh.exe','taskmgr.exe','regedit.exe',
+    'mmc.exe','control.exe','msconfig.exe'
   ) then
     raise exception 'Refusing to create a rule for protected system process: %', NEW.exe_name;
   end if;

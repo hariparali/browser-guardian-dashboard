@@ -32,6 +32,9 @@ class SupabaseSync:
         self._show_message_cb   = None
         self._extend_app_cb     = None
         self._block_app_cb      = None
+        self._close_app_cb      = None
+        self._unblock_app_cb    = None
+        self._unblock_all_cb    = None
         self._tracker           = None   # UsageTracker, set via set_app_tracker
         self._app_tick          = 0      # counts 5s loops, for the ~60s app cycle
         self._stop              = threading.Event()
@@ -48,13 +51,20 @@ class SupabaseSync:
         self._block_roblox_cb  = block_roblox
         self._show_message_cb  = show_message
 
-    def set_app_callbacks(self, extend_app=None, block_app=None):
+    def set_app_callbacks(self, extend_app=None, block_app=None,
+                          close_app=None, unblock_app=None, unblock_all=None):
         """Per-app remote commands from the dashboard.
         extend_app(exe_name, secs) → grant more time today
-        block_app(exe_name)        → close it right now
+        block_app(exe_name)        → close it AND stop it relaunching
+        close_app(exe_name)        → close it only, no launch-block
+        unblock_app(exe_name)      → lift one launch-block
+        unblock_all()              → lift every launch-block on this device
         """
-        self._extend_app_cb = extend_app
-        self._block_app_cb  = block_app
+        self._extend_app_cb  = extend_app
+        self._block_app_cb   = block_app
+        self._close_app_cb   = close_app
+        self._unblock_app_cb = unblock_app
+        self._unblock_all_cb = unblock_all
 
     def set_app_tracker(self, tracker):
         """Attach the UsageTracker so the sync loop can upload its totals and
@@ -163,6 +173,19 @@ class SupabaseSync:
                 if exe:
                     self._block_app_cb(exe)
                     log.info('[supabase_sync] block_app %s', exe)
+            elif command == 'close_app' and self._close_app_cb:
+                exe = str(params.get('exe_name', '')).lower()[:120]
+                if exe:
+                    self._close_app_cb(exe)
+                    log.info('[supabase_sync] close_app %s', exe)
+            elif command == 'unblock_app' and self._unblock_app_cb:
+                exe = str(params.get('exe_name', '')).lower()[:120]
+                if exe:
+                    self._unblock_app_cb(exe)
+                    log.info('[supabase_sync] unblock_app %s', exe)
+            elif command == 'unblock_all_apps' and self._unblock_all_cb:
+                self._unblock_all_cb()
+                log.info('[supabase_sync] unblock_all_apps executed')
         except Exception as e:
             log.error('[supabase_sync] execute error: %s', e)
         finally:

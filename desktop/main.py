@@ -636,12 +636,30 @@ def _remote_extend_app(exe_name: str, secs: int):
 
 
 def _remote_block_app(exe_name: str):
-    if exe_name in APP_PROTECTED:
-        log.warning('[app_limit] refusing remote block of protected %s', exe_name)
-        return
-    log.info('[app_limit] remote close requested for %s', exe_name)
-    _app_engage_block(exe_name)
-    force_close_by_name(exe_name)
+    """Dashboard "Block": close it AND stop it relaunching."""
+    app_usage_tracker.block_now(exe_name)
+
+
+def _remote_close_app(exe_name: str):
+    """Dashboard "Close": close it only, no launch-block. Kept separate so a
+    one-off close can never leave a persistent block behind."""
+    app_usage_tracker.close_only(exe_name)
+
+
+def _remote_unblock_app(exe_name: str):
+    app_usage_tracker.unblock(exe_name)
+
+
+def _remote_unblock_all():
+    """Panic button: lift every app launch-block this device has applied.
+
+    Matters because a block lives in the registry and is only removed by the
+    guardian. If the guardian ever stops starting (it happened on 2026-09-17
+    when the scheduled task vanished), this lets the parent clear everything
+    from the dashboard without touching the PC.
+    """
+    released = app_usage_tracker.release_all_blocks()
+    log.info('[app_limit] unblock-all released: %s', released or '(nothing blocked)')
 
 
 # ── UI Automation URL watcher ─────────────────────────────────────────────────
@@ -753,6 +771,9 @@ supabase_sync.set_action_callbacks(
 supabase_sync.set_app_callbacks(
     extend_app=_remote_extend_app,
     block_app=_remote_block_app,
+    close_app=_remote_close_app,
+    unblock_app=_remote_unblock_app,
+    unblock_all=_remote_unblock_all,
 )
 supabase_sync.set_app_tracker(app_usage_tracker)
 
