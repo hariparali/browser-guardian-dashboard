@@ -335,8 +335,15 @@ def _elevated_task_exists():
         return False
 
 
-def remove_startup():
-    """Remove app from Windows startup (HKCU Run key AND the elevated task)."""
+def remove_run_key():
+    """Remove ONLY the HKCU Run-key entry. Leaves the scheduled task alone.
+
+    Kept separate from remove_startup() on purpose. Startup used to call a
+    combined helper that also deleted the elevated task — so the task launched
+    the app and the app immediately deleted the task, meaning nothing started it
+    at the NEXT boot. That is the "task not found" problem; never delete the task
+    from a normal startup path.
+    """
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_REG_KEY, 0,
                              winreg.KEY_SET_VALUE)
@@ -344,12 +351,61 @@ def remove_startup():
         winreg.CloseKey(key)
     except FileNotFoundError:
         pass  # Already removed
-    # Also delete the elevated scheduled task if present (needs elevation).
+
+
+def remove_elevated_task():
+    """Delete the elevated ONLOGON task. ONLY for the kill switch."""
     try:
         subprocess.run(['schtasks', '/delete', '/tn', _ELEVATED_TASK_NAME, '/f'],
                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception:
         pass
+
+
+def remove_startup():
+    """Full uninstall of auto-start: Run key AND the elevated task."""
+    remove_run_key()
+    remove_elevated_task()
+
+
+def _ensure_elevated_task():
+    """Recreate the elevated ONLOGON task if it has gone missing.
+
+    Self-healing: the task has vanished twice in the wild. Our own startup bug
+    was the main cause, but AVG on this PC is also known to interfere (it reverts
+    the hosts file and stalls WMI), so verify on every start rather than assume.
+    Requires elevation; a non-elevated process cannot register /RL HIGHEST.
+    """
+    if _elevated_task_exists():
+        return True
+    if not roblox_lock.is_elevated():
+        log.warning('[startup] elevated task missing and we are NOT elevated — '
+                    'cannot recreate it; run setup as admin to restore auto-start')
+        return False
+    launcher = os.path.join(_BASE, 'launcher.vbs')
+    if not os.path.exists(launcher):
+        log.warning('[startup] cannot recreate task: launcher.vbs not found at %s', launcher)
+        return False
+    user = os.environ.get('USERNAME') or ''
+    sysroot = os.environ.get('SystemRoot') or 'C:\\Windows'
+    wscript = os.path.join(sysroot, 'System32', 'wscript.exe')
+    action  = '"{}" "{}"'.format(wscript, launcher)
+    try:
+        r = subprocess.run(
+            ['schtasks', '/create', '/f', '/tn', _ELEVATED_TASK_NAME,
+             '/rl', 'HIGHEST', '/sc', 'ONLOGON', '/ru', user,
+             '/tr', action],
+            capture_output=True, text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if r.returncode == 0:
+            log.info('[startup] elevated ONLOGON task was MISSING — recreated for %s', user)
+            return True
+        log.warning('[startup] could not recreate elevated task (rc=%s): %s',
+                    r.returncode, (r.stderr or r.stdout or '').strip()[:200])
+    except Exception as e:
+        log.warning('[startup] recreate elevated task failed: %s', e)
+    return False
 
 
 # ── Password dialog helpers ───────────────────────────────────────────────────
@@ -1253,14 +1309,21 @@ def on_tray_ready(icon):
     #   - Otherwise keep the Run-key entry (points to launcher.vbs for crash
     #     auto-restart) as before.
     try:
-        if _elevated_task_exists():
-            remove_startup()
-            log.info('[startup] elevated scheduled task present — HKCU Run-key disabled')
+        # Make sure the elevated task still exists (recreating it if something
+        # removed it) BEFORE deciding what to do with the Run key — otherwise a
+        # missing task plus a dropped Run key leaves nothing to start us.
+        have_task = _ensure_elevated_task()
+        if have_task:
+            # Drop ONLY the redundant Run key. Deleting the task here is what
+            # used to break auto-start at the next boot.
+            remove_run_key()
+            log.info('[startup] elevated task present — HKCU Run-key disabled')
         else:
             register_startup()
-            log.info('[startup] startup registry entry updated (non-elevated launch)')
+            log.warning('[startup] no elevated task — falling back to Run key '
+                        '(NOT elevated: Roblox kill + launch-block will not work)')
     except Exception as e:
-        log.warning('[startup] could not update startup registry: %s', e)
+        log.warning('[startup] could not update startup registration: %s', e)
     if not hosts_is_installed():
         log.warning('[startup] hosts file blocking NOT installed — run install.bat as admin')
     else:
